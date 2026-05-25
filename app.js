@@ -59,17 +59,18 @@ function formatDisplayDate(ds) {
   return d.getDate()+' '+MONTHS_SHORT[d.getMonth()]+' '+d.getFullYear();
 }
 
-// ─── SCREENS ─────────────────────────────────────────────
-function showSetup() {
-  document.getElementById('screen-setup').classList.remove('hidden');
-  document.getElementById('screen-app').classList.add('hidden');
-  document.getElementById('redirectUriHint').textContent = REDIRECT_URI;
-}
-
+// ─── SCREEN ──────────────────────────────────────────────
 function showApp() {
-  document.getElementById('screen-setup').classList.add('hidden');
-  document.getElementById('screen-app').classList.remove('hidden');
+  // Show banner if no clientId configured
+  const banner = document.getElementById('setupBanner');
+  if (!cfg.clientId) {
+    banner.classList.remove('hidden');
+  } else {
+    banner.classList.add('hidden');
+  }
+  document.getElementById('redirectUriHint').textContent = REDIRECT_URI;
   renderChannelList();
+  renderChannelsSettings();
   renderCalendar();
 }
 
@@ -431,6 +432,29 @@ function renderChannelList() {
   });
 }
 
+function renderChannelsSettings() {
+  const el = document.getElementById('channelsListSettings');
+  if (!el) return;
+  if (!channels.length) {
+    el.innerHTML='<p style="color:var(--text3);font-size:.85rem">Нет подключённых каналов</p>';
+    return;
+  }
+  el.innerHTML = channels.map((ch,i)=>
+    '<div class="channel-item" style="background:var(--bg3);border-radius:8px;margin-bottom:6px">'
+    +'<div class="ch-dot" style="background:'+CH_DOT_COLORS[ch.colorIdx]+'"></div>'
+    +'<div class="ch-info"><div class="ch-name">'+ch.title+'</div><div class="ch-sub">'+ch.id+'</div></div>'
+    +'<button class="icon-btn" onclick="removeChannel('+i+')" title="Удалить">🗑</button>'
+    +'</div>'
+  ).join('');
+}
+
+function removeChannel(idx) {
+  if (!confirm('Удалить канал "'+channels[idx].title+'"?')) return;
+  channels.splice(idx,1); saveStorage();
+  renderChannelList(); renderChannelsSettings();
+  showToast('Канал удалён');
+}
+
 // ─── UPLOAD MODAL ────────────────────────────────────────
 function openUploadModal(ds) {
   pendingFile=null; currentTags=[];
@@ -626,11 +650,25 @@ function attachAppListeners() {
     openUploadModal(ds);
   });
 
-  // Settings
+  // Banner → settings
+  document.getElementById('btnOpenSettings').addEventListener('click',()=>switchTab('settings'));
+
+  // FAB → open today
+  document.getElementById('fabAdd').addEventListener('click',()=>openUploadModal(today()));
+
+  // Add channel from settings tab
+  document.getElementById('btnAddChannelSettings').addEventListener('click', startOAuth);
+
+  // Settings save
   document.getElementById('btnSaveSettings').addEventListener('click',()=>{
-    cfg.clientId=document.getElementById('settingsClientId').value.trim();
-    cfg.claudeKey=document.getElementById('settingsClaudeKey').value.trim();
-    saveStorage(); showToast('✅ Настройки сохранены');
+    const cid  = document.getElementById('settingsClientId').value.trim();
+    const ckey = document.getElementById('settingsClaudeKey').value.trim();
+    if (!cid) { showToast('Введи Google Client ID', true); return; }
+    cfg.clientId = cid;
+    cfg.claudeKey = ckey;
+    saveStorage();
+    document.getElementById('setupBanner').classList.add('hidden');
+    showToast('✅ Настройки сохранены');
   });
   document.getElementById('btnClearData').addEventListener('click',()=>{
     if(confirm('Удалить все данные?')){localStorage.clear();location.reload();}
@@ -653,30 +691,14 @@ async function init() {
     const dt=new Date(base); dt.setDate(base.getDate()+d); FOOTBALL_EVENTS[fmtDate(dt)]=n;
   });
 
-  // ALWAYS attach setup button listener first (before any early returns)
-  document.getElementById('btnSaveSetup').addEventListener('click', ()=>{
-    const cid  = document.getElementById('inputClientId').value.trim();
-    const ckey = document.getElementById('inputClaudeKey').value.trim();
-    if (!cid) { showToast('Введи Google Client ID', true); return; }
-    cfg.clientId = cid;
-    if (ckey) cfg.claudeKey = ckey;
-    saveStorage();
-    attachAppListeners();
-    showApp();
-  });
-
   // Handle OAuth callback
   const code = new URLSearchParams(window.location.search).get('code');
   if (code) {
     window.history.replaceState({}, '', window.location.pathname);
     if (cfg.clientId) {
-      const ok = await handleOAuthCallback(code);
-      if (ok) { attachAppListeners(); showApp(); return; }
+      await handleOAuthCallback(code);
     }
   }
-
-  // Decide which screen to show
-  if (!cfg.clientId) { showSetup(); return; }
 
   attachAppListeners();
   showApp();
