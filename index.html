@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube Content Bot — Hub of Ballers</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <span class="logo-icon">⚽</span>
+        <span class="logo-text">ContentBot</span>
+      </div>
+      <button class="sidebar-toggle" id="sidebarToggle">☰</button>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-tab="schedule">
+        <span class="nav-icon">📅</span>
+        <span class="nav-label">Расписание</span>
+      </button>
+      <button class="nav-item" data-tab="metadata">
+        <span class="nav-icon">✨</span>
+        <span class="nav-label">Мета-генератор</span>
+      </button>
+      <button class="nav-item" data-tab="contentplan">
+        <span class="nav-icon">📋</span>
+        <span class="nav-label">Контент-план</span>
+      </button>
+      <button class="nav-item" data-tab="analytics">
+        <span class="nav-icon">📊</span>
+        <span class="nav-label">Аналитика</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-channels">
+      <p class="sidebar-section-title">Каналы</p>
+      <div class="channel-badge ch-hub">
+        <span class="ch-dot"></span> Hub of Ballers
+      </div>
+      <div class="channel-badge ch-ballers">
+        <span class="ch-dot"></span> BaIIersHub
+      </div>
+      <div class="channel-badge ch-yamal">
+        <span class="ch-dot"></span> YamalPedia
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content -->
+  <main class="main" id="main">
+    <!-- Header -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="topbar-toggle" id="topbarToggle">☰</button>
+        <h1 class="page-title" id="pageTitle">Расписание публикаций</h1>
+      </div>
+      <div class="topbar-right">
+        <div class="stats-pill">
+          <span class="stats-dot green"></span>
+          <span id="weekCount">0</span> на этой неделе
+        </div>
+        <span class="today-badge" id="todayBadge"></span>
+      </div>
+    </header>
+
+    <!-- ─────────────────── SCHEDULE TAB ─────────────────── -->
+    <section class="tab-panel active" id="tab-schedule">
+      <div class="week-nav">
+        <button class="btn-ghost" id="prevWeek">← Пред. неделя</button>
+        <span class="week-label" id="weekLabel"></span>
+        <button class="btn-ghost" id="nextWeek">След. неделя →</button>
+      </div>
+
+      <div class="legend">
+        <span class="legend-item"><span class="badge badge-long">Лонг</span></span>
+        <span class="legend-item"><span class="badge badge-short">Short</span></span>
+        <span class="legend-item"><span class="badge badge-post">Пост</span></span>
+        <span class="legend-item"><span class="badge badge-event">⚡ Матч</span></span>
+      </div>
+
+      <div class="calendar-grid" id="calendarGrid"></div>
+
+      <!-- Add publication modal trigger -->
+      <button class="fab" id="openAddModal">＋</button>
+    </section>
+
+    <!-- ─────────────────── METADATA TAB ─────────────────── -->
+    <section class="tab-panel" id="tab-metadata">
+      <div class="card">
+        <h2 class="card-title">Генератор метаданных <span class="ai-badge">AI</span></h2>
+        <p class="card-desc">Введи идею видео — получи готовые заголовок, теги, описание и хук за несколько секунд.</p>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Канал</label>
+            <select id="metaChannel">
+              <option value="hub">The Hub of Ballers</option>
+              <option value="ballers">BaIIersHub</option>
+              <option value="yamal">YamalPedia</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Тип контента</label>
+            <select id="metaType">
+              <option value="long">Лонг</option>
+              <option value="short">Short</option>
+              <option value="post">Пост / Community</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Язык метаданных</label>
+            <select id="metaLang">
+              <option value="ru">Русский</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group full">
+          <label>Идея / рабочее название</label>
+          <textarea id="metaIdea" rows="3" placeholder="Например: Топ-10 финтов Ямаля в сезоне 2024/25 — лучшие моменты..."></textarea>
+        </div>
+
+        <button class="btn-primary" id="generateMeta">
+          <span class="btn-icon">✨</span> Сгенерировать метаданные
+        </button>
+      </div>
+
+      <!-- Result -->
+      <div class="meta-result hidden" id="metaResult">
+        <div class="result-grid">
+          <div class="result-card">
+            <div class="result-label">📌 Заголовок</div>
+            <div class="result-value" id="resTitle"></div>
+            <button class="copy-btn" data-target="resTitle">Копировать</button>
+          </div>
+          <div class="result-card">
+            <div class="result-label">⏱ Хук (первые 5 сек)</div>
+            <div class="result-value" id="resHook"></div>
+            <button class="copy-btn" data-target="resHook">Копировать</button>
+          </div>
+          <div class="result-card full-width">
+            <div class="result-label">📝 Описание</div>
+            <div class="result-value" id="resDesc"></div>
+            <button class="copy-btn" data-target="resDesc">Копировать</button>
+          </div>
+          <div class="result-card full-width">
+            <div class="result-label">🏷 Теги</div>
+            <div class="tags-wrap" id="resTags"></div>
+            <button class="copy-btn" data-target-tags="true">Копировать теги</button>
+          </div>
+          <div class="result-card">
+            <div class="result-label">🖼 Идея для превью</div>
+            <div class="result-value" id="resThumbnail"></div>
+          </div>
+          <div class="result-card">
+            <div class="result-label">🕐 Рекомендуемое время</div>
+            <div class="result-value time-value" id="resTime"></div>
+          </div>
+        </div>
+
+        <button class="btn-secondary" id="saveToSchedule">📅 Добавить в расписание</button>
+      </div>
+
+      <div class="spinner hidden" id="metaSpinner">
+        <div class="spin-ring"></div>
+        <p>Генерирую метаданные…</p>
+      </div>
+    </section>
+
+    <!-- ─────────────────── CONTENT PLAN TAB ─────────────────── -->
+    <section class="tab-panel" id="tab-contentplan">
+      <div class="card">
+        <h2 class="card-title">Генератор контент-плана <span class="ai-badge">AI</span></h2>
+        <p class="card-desc">Автоматически составляет план на 7 или 14 дней с учётом футбольных событий.</p>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Период</label>
+            <select id="planPeriod">
+              <option value="7">7 дней</option>
+              <option value="14">14 дней</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Каналы</label>
+            <select id="planChannels" multiple>
+              <option value="hub" selected>Hub of Ballers</option>
+              <option value="ballers" selected>BaIIersHub</option>
+              <option value="yamal" selected>YamalPedia</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Фокус этого периода</label>
+            <input type="text" id="planFocus" placeholder="Финал UCL, начало сезона…" />
+          </div>
+        </div>
+
+        <button class="btn-primary" id="generatePlan">
+          <span class="btn-icon">📋</span> Составить контент-план
+        </button>
+      </div>
+
+      <div class="spinner hidden" id="planSpinner">
+        <div class="spin-ring"></div>
+        <p>Составляю контент-план…</p>
+      </div>
+
+      <div class="plan-result hidden" id="planResult">
+        <div class="plan-header">
+          <h3 id="planTitle"></h3>
+          <div class="plan-stats" id="planStats"></div>
+        </div>
+        <div class="plan-advice card" id="planAdvice"></div>
+        <div class="plan-days" id="planDays"></div>
+        <button class="btn-secondary" id="addPlanToSchedule">📅 Загрузить в расписание</button>
+      </div>
+    </section>
+
+    <!-- ─────────────────── ANALYTICS TAB ─────────────────── -->
+    <section class="tab-panel" id="tab-analytics">
+      <div class="analytics-grid">
+        <div class="card analytics-card">
+          <h3 class="card-title">⏰ Лучшее время публикации</h3>
+          <p class="card-desc">Для аудитории СНГ (GMT+5)</p>
+          <div class="time-grid">
+            <div class="time-row">
+              <span class="time-day">Пн–Пт</span>
+              <div class="time-bars">
+                <div class="time-bar" style="--h:40%" title="9:00">9</div>
+                <div class="time-bar" style="--h:55%" title="12:00">12</div>
+                <div class="time-bar" style="--h:95%; background:var(--accent)" title="16:00">16</div>
+                <div class="time-bar" style="--h:90%; background:var(--accent)" title="19:00">19</div>
+                <div class="time-bar" style="--h:60%" title="21:00">21</div>
+              </div>
+            </div>
+            <div class="time-row">
+              <span class="time-day">Сб–Вс</span>
+              <div class="time-bars">
+                <div class="time-bar" style="--h:90%; background:var(--accent)" title="9:00">9</div>
+                <div class="time-bar" style="--h:85%; background:var(--accent)" title="11:00">11</div>
+                <div class="time-bar" style="--h:65%" title="14:00">14</div>
+                <div class="time-bar" style="--h:70%" title="18:00">18</div>
+                <div class="time-bar" style="--h:50%" title="21:00">21</div>
+              </div>
+            </div>
+          </div>
+          <div class="time-tips">
+            <div class="tip-item">🟢 <strong>Лонги:</strong> Пн–Пт 16:00–19:00 GMT+5</div>
+            <div class="tip-item">🟡 <strong>Shorts:</strong> Сб–Вс 9:00–11:00 GMT+5</div>
+            <div class="tip-item">⚡ <strong>Реакции на матчи:</strong> через 1–2 часа после финала</div>
+          </div>
+        </div>
+
+        <div class="card analytics-card">
+          <h3 class="card-title">⚡ Ближайшие футбольные события</h3>
+          <div class="events-list" id="eventsList"></div>
+        </div>
+
+        <div class="card analytics-card full-analytics">
+          <h3 class="card-title">📈 Статистика расписания</h3>
+          <div class="pub-stats" id="pubStats"></div>
+        </div>
+
+        <div class="card analytics-card">
+          <h3 class="card-title">🎯 Баланс контента</h3>
+          <div class="balance-chart" id="balanceChart"></div>
+          <div class="balance-tips">
+            <div class="balance-tip">Shorts ≥ 40% ✓</div>
+            <div class="balance-tip">Лонги 2–3/нед ✓</div>
+            <div class="balance-tip">Посты 1–2/нед ✓</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ─────────────────── ADD MODAL ─────────────────── -->
+  <div class="modal-overlay hidden" id="addModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Добавить публикацию</h3>
+        <button class="modal-close" id="closeModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Дата</label>
+          <input type="date" id="addDate" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Канал</label>
+            <select id="addChannel">
+              <option value="hub">Hub of Ballers</option>
+              <option value="ballers">BaIIersHub</option>
+              <option value="yamal">YamalPedia</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Тип</label>
+            <select id="addType">
+              <option value="long">Лонг</option>
+              <option value="short">Short</option>
+              <option value="post">Пост</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Название / идея</label>
+          <input type="text" id="addTitle" placeholder="Название видео или идея…" />
+        </div>
+        <div class="form-group">
+          <label>Время публикации</label>
+          <input type="time" id="addTime" value="16:00" />
+        </div>
+        <div class="form-group">
+          <label>Статус</label>
+          <select id="addStatus">
+            <option value="planned">Запланировано</option>
+            <option value="published">Опубликовано</option>
+            <option value="missed">Пропущено</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-ghost" id="cancelModal">Отмена</button>
+        <button class="btn-primary" id="confirmAdd">Добавить</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
