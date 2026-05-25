@@ -96,7 +96,36 @@ async function startOAuth() {
     access_type: 'offline',
     prompt: 'consent select_account',
   });
-  window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?'+p;
+
+  // Open OAuth in a popup — main page stays open
+  const w = 500, h = 650;
+  const left = Math.round(screen.width / 2 - w / 2);
+  const top  = Math.round(screen.height / 2 - h / 2);
+  const popup = window.open(
+    'https://accounts.google.com/o/oauth2/v2/auth?' + p,
+    'yt_oauth',
+    `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`
+  );
+
+  if (!popup) {
+    showToast('⚠️ Разреши всплывающие окна для этого сайта и попробуй снова', true);
+    return;
+  }
+
+  showToast('Открываю окно авторизации Google...');
+
+  // Receive the auth code from the popup via postMessage
+  const handler = async (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (!event.data || event.data.type !== 'yt_oauth_code') return;
+    window.removeEventListener('message', handler);
+    const { code } = event.data;
+    if (code) {
+      const ok = await handleOAuthCallback(code);
+      if (ok) { renderChannelList(); renderChannelsSettings(); renderCalendar(); }
+    }
+  };
+  window.addEventListener('message', handler);
 }
 
 async function handleOAuthCallback(code) {
@@ -683,22 +712,22 @@ function updateTitleCounter() {
 
 // ─── MAIN INIT ───────────────────────────────────────────
 async function init() {
+  // If we're the OAuth popup callback page — send code to parent & close
+  const params = new URLSearchParams(window.location.search);
+  const code   = params.get('code');
+  if (code && window.opener && !window.opener.closed) {
+    window.opener.postMessage({ type: 'yt_oauth_code', code }, window.location.origin);
+    window.close();
+    return; // stop — this tab is the popup, parent handles everything
+  }
+
   loadStorage();
 
   // Seed football events
-  const base=new Date();
+  const base = new Date();
   [[3,'Финал Лиги Чемпионов'],[7,'Барселона — Реал Мадрид'],[11,'Copa América — старт'],[18,'Финал Лиги Европы']].forEach(([d,n])=>{
-    const dt=new Date(base); dt.setDate(base.getDate()+d); FOOTBALL_EVENTS[fmtDate(dt)]=n;
+    const dt = new Date(base); dt.setDate(base.getDate()+d); FOOTBALL_EVENTS[fmtDate(dt)] = n;
   });
-
-  // Handle OAuth callback
-  const code = new URLSearchParams(window.location.search).get('code');
-  if (code) {
-    window.history.replaceState({}, '', window.location.pathname);
-    if (cfg.clientId) {
-      await handleOAuthCallback(code);
-    }
-  }
 
   attachAppListeners();
   showApp();
