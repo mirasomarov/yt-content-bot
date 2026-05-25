@@ -5,7 +5,6 @@
 'use strict';
 
 // ─── CONFIG ──────────────────────────────────────────────
-const REDIRECT_URI = window.location.origin + window.location.pathname;
 const YT_SCOPES = 'https://www.googleapis.com/auth/youtube https://www.googleapis.com/auth/youtube.upload';
 const FOOTBALL_EVENTS = {};
 const CH_DOT_COLORS = ['#ff3e3e','#3b82f6','#a855f7','#22c55e'];
@@ -68,116 +67,60 @@ function showApp() {
   } else {
     banner.classList.add('hidden');
   }
-  document.getElementById('redirectUriHint').textContent = REDIRECT_URI;
+  document.getElementById('redirectUriHint').textContent = window.location.origin;
   renderChannelList();
   renderChannelsSettings();
   renderCalendar();
 }
 
-// ─── OAUTH 2.0 PKCE ──────────────────────────────────────
-function b64url(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
-    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+// ─── OAUTH via Google Identity Services (GIS) ────────────
+// No redirects — GIS handles auth in its own popup and returns
+// the access_token directly in a callback. Works on GitHub Pages.
+
+function gisTokenClient(hint, prompt, callback) {
+  if (typeof google === 'undefined' || !google.accounts) {
+    showToast('Библиотека Google ещё загружается, подожди секунду', true);
+    return null;
+  }
+  return google.accounts.oauth2.initTokenClient({
+    client_id: cfg.clientId,
+    scope: YT_SCOPES,
+    hint: hint || '',
+    prompt: prompt,
+    callback,
+  });
 }
 
 async function startOAuth() {
   if (!cfg.clientId) { showToast('Сначала введи Client ID в настройках', true); return; }
-  const verifier  = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  const hashBuf   = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-  const challenge = b64url(hashBuf);
-  // Store verifier in MAIN window's sessionStorage (popup cannot access it)
-  sessionStorage.setItem('pkce_v', verifier);
-  // Clear any stale return value
-  localStorage.removeItem('yt_oauth_return');
 
-  const p = new URLSearchParams({
-    client_id: cfg.clientId,
-    redirect_uri: REDIRECT_URI,
-    response_type: 'code',
-    scope: YT_SCOPES,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    access_type: 'offline',
-    prompt: 'consent select_account',
-  });
-
-  const w = 500, h = 660;
-  const left = Math.round(screen.width  / 2 - w / 2);
-  const top  = Math.round(screen.height / 2 - h / 2);
-  const popup = window.open(
-    'https://accounts.google.com/o/oauth2/v2/auth?' + p,
-    'yt_oauth',
-    `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`
-  );
-
-  if (!popup) {
-    showToast('⚠️ Разреши всплывающие окна для этого сайта, затем повтори', true);
-    return;
-  }
-
-  showToast('🔑 Войди в Google в открывшемся окне...');
-
-  // Poll localStorage every 500 ms — popup writes code there after redirect
-  let done = false;
-  const poll = setInterval(async () => {
-    // Check localStorage for code written by the popup
-    const raw = localStorage.getItem('yt_oauth_return');
-    if (raw) {
-      localStorage.removeItem('yt_oauth_return');
-      clearInterval(poll);
-      done = true;
-      try {
-        const { code } = JSON.parse(raw);
-        if (code) {
-          const ok = await handleOAuthCallback(code);
-          if (ok) { renderChannelList(); renderChannelsSettings(); renderCalendar(); }
-        }
-      } catch(e) { showToast('Ошибка OAuth', true); }
+  const client = gisTokenClient('', 'select_account', async (response) => {
+    if (response.error) {
+      showToast('Ошибка авторизации: ' + response.error, true);
       return;
     }
-    // Stop polling if user closed popup without logging in
-    if (popup.closed && !done) {
-      clearInterval(poll);
-      showToast('Авторизация отменена', true);
-    }
-  }, 500);
-}
+    const token     = response.access_token;
+    const expiresIn = parseInt(response.expires_in) || 3600;
 
-async function handleOAuthCallback(code) {
-  const verifier = sessionStorage.getItem('pkce_v');
-  if (!verifier || !cfg.clientId) return false;
-  sessionStorage.removeItem('pkce_v');
+    showToast('Получаю информацию о канале...');
+    const chInfo = await fetchChannelInfo(token);
+    if (!chInfo) { showToast('Не удалось получить данные канала', true); return; }
 
-  showToast('Получаю токены...');
-  const res  = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {'Content-Type':'application/x-www-form-urlencoded'},
-    body: new URLSearchParams({
-      client_id: cfg.clientId, code,
-      code_verifier: verifier,
-      grant_type: 'authorization_code',
-      redirect_uri: REDIRECT_URI,
-    }),
+    const colorIdx = channels.length % 4;
+    const idx      = channels.findIndex(c => c.id === chInfo.id);
+    const chData   = {
+      id: chInfo.id, title: chInfo.title, thumbnail: chInfo.thumbnail,
+      token,
+      tokenExpiry: Date.now() + expiresIn * 1000,
+      colorIdx,
+    };
+    if (idx >= 0) channels[idx] = chData; else channels.push(chData);
+    saveStorage();
+    showToast('✅ Канал "' + chInfo.title + '" подключён!');
+    renderChannelList(); renderChannelsSettings(); renderCalendar();
   });
-  const tokens = await res.json();
-  if (tokens.error) { showToast('Ошибка OAuth: '+tokens.error_description, true); return false; }
 
-  const chInfo = await fetchChannelInfo(tokens.access_token);
-  if (!chInfo) { showToast('Не удалось получить данные канала', true); return false; }
-
-  const colorIdx = channels.length % 4;
-  const idx = channels.findIndex(c=>c.id===chInfo.id);
-  const chData = {
-    id: chInfo.id, title: chInfo.title, thumbnail: chInfo.thumbnail,
-    token: tokens.access_token,
-    refreshToken: tokens.refresh_token||null,
-    tokenExpiry: Date.now()+(tokens.expires_in*1000),
-    colorIdx,
-  };
-  if (idx>=0) channels[idx]=chData; else channels.push(chData);
-  saveStorage();
-  showToast('✅ Канал "'+chInfo.title+'" подключён!');
-  return true;
+  if (client) client.requestAccessToken();
 }
 
 async function fetchChannelInfo(token) {
@@ -192,20 +135,24 @@ async function fetchChannelInfo(token) {
 }
 
 async function getValidToken(channelId) {
-  const ch = channels.find(c=>c.id===channelId);
+  const ch = channels.find(c => c.id === channelId);
   if (!ch) return null;
-  if (Date.now() < ch.tokenExpiry-60000) return ch.token;
-  if (!ch.refreshToken) return null;
-  const r = await fetch('https://oauth2.googleapis.com/token',{
-    method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-    body: new URLSearchParams({client_id:cfg.clientId,grant_type:'refresh_token',refresh_token:ch.refreshToken}),
+  // Token still valid
+  if (Date.now() < ch.tokenExpiry - 60000) return ch.token;
+
+  // Token expired — silently re-request via GIS (no redirect, no prompt if possible)
+  return new Promise((resolve) => {
+    showToast('Обновляю токен для "' + ch.title + '"...');
+    const client = gisTokenClient(ch.id, '', async (response) => {
+      if (response.error || !response.access_token) { resolve(null); return; }
+      ch.token      = response.access_token;
+      ch.tokenExpiry = Date.now() + (parseInt(response.expires_in) || 3600) * 1000;
+      saveStorage();
+      resolve(ch.token);
+    });
+    if (client) client.requestAccessToken({ prompt: '' });
+    else resolve(null);
   });
-  const t = await r.json();
-  if (t.access_token) {
-    ch.token=t.access_token; ch.tokenExpiry=Date.now()+(t.expires_in*1000);
-    saveStorage(); return ch.token;
-  }
-  return null;
 }
 
 // ─── YOUTUBE UPLOAD ──────────────────────────────────────
@@ -727,42 +674,6 @@ function updateTitleCounter() {
 
 // ─── MAIN INIT ───────────────────────────────────────────
 async function init() {
-  const params = new URLSearchParams(window.location.search);
-  const code   = params.get('code');
-
-  // ── OAuth popup callback: write code to localStorage then close ──
-  if (code) {
-    // Clean the URL immediately so no double-processing
-    window.history.replaceState({}, '', window.location.pathname);
-
-    // Write code for the main window's polling loop
-    try { localStorage.setItem('yt_oauth_return', JSON.stringify({ code, ts: Date.now() })); } catch(e) {}
-
-    // Attempt to close the popup window
-    window.close();
-
-    // If window didn't close (wasn't a popup / browser blocked it),
-    // show a success message and let the user navigate back manually.
-    document.body.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:center;
-                  height:100vh;background:#0f0f13;color:#fff;
-                  font-family:Inter,sans-serif;text-align:center;padding:24px">
-        <div>
-          <div style="font-size:3rem;margin-bottom:16px">✅</div>
-          <div style="font-size:1.2rem;font-weight:600;margin-bottom:8px">Авторизация успешна!</div>
-          <div style="color:#aaa;font-size:.9rem;margin-bottom:24px">
-            Вернись на вкладку с приложением — канал уже добавлен.
-          </div>
-          <a href="${window.location.pathname}"
-             style="background:#ff3e3e;color:#fff;padding:10px 24px;
-                    border-radius:8px;text-decoration:none;font-weight:600">
-            Открыть приложение →
-          </a>
-        </div>
-      </div>`;
-    return;
-  }
-
   loadStorage();
 
   // Seed football events

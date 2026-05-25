@@ -6,6 +6,8 @@
   <title>YouTube Content Bot</title>
   <link rel="stylesheet" href="style.css"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <!-- Google Identity Services — OAuth без редиректов -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -75,10 +77,11 @@
             <summary>Как получить Google Client ID?</summary>
             <ol>
               <li>Открой <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
-              <li>Создай проект → включи <strong>YouTube Data API v3</strong></li>
+              <li>Включи <strong>YouTube Data API v3</strong></li>
               <li>Перейди в <strong>APIs &amp; Services → Credentials → Create Credentials → OAuth Client ID</strong></li>
               <li>Тип: <strong>Web application</strong></li>
-              <li>Authorized redirect URI: <code id="redirectUriHint"></code></li>
+              <li>В поле <strong>Authorized JavaScript origins</strong> добавь: <code id="redirectUriHint"></code></li>
+              <li>Поле Redirect URIs оставь пустым</li>
               <li>Скопируй <strong>Client ID</strong> и вставь ниже</li>
             </ol>
           </details>
