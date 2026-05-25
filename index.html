@@ -6,8 +6,6 @@
   <title>YouTube Content Bot</title>
   <link rel="stylesheet" href="style.css"/>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
-  <!-- Google Identity Services — OAuth без редиректов -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
 
@@ -74,15 +72,15 @@
 
         <div class="setup-steps">
           <details>
-            <summary>Как получить Google Client ID?</summary>
+            <summary>Как получить Google Client ID и Secret?</summary>
             <ol>
               <li>Открой <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
               <li>Включи <strong>YouTube Data API v3</strong></li>
               <li>Перейди в <strong>APIs &amp; Services → Credentials → Create Credentials → OAuth Client ID</strong></li>
               <li>Тип: <strong>Web application</strong></li>
-              <li>В поле <strong>Authorized JavaScript origins</strong> добавь: <code id="redirectUriHint"></code></li>
-              <li>Поле Redirect URIs оставь пустым</li>
-              <li>Скопируй <strong>Client ID</strong> и вставь ниже</li>
+              <li>В поле <strong>Authorized redirect URIs</strong> добавь: <code id="redirectUriHint"></code></li>
+              <li>Скопируй <strong>Client ID</strong> и <strong>Client Secret</strong> и вставь ниже</li>
+              <li>Добавь свой email в <a href="https://console.cloud.google.com/auth/audience" target="_blank">OAuth Consent → Test users</a></li>
             </ol>
           </details>
         </div>
@@ -90,6 +88,10 @@
         <div class="form-group">
           <label>Google OAuth Client ID</label>
           <input type="text" id="settingsClientId" placeholder="xxxxxxxx.apps.googleusercontent.com"/>
+        </div>
+        <div class="form-group">
+          <label>Google OAuth Client Secret</label>
+          <input type="password" id="settingsClientSecret" placeholder="GOCSPX-..."/>
         </div>
         <div class="form-group">
           <label>Anthropic API Key <span style="font-weight:400;color:var(--text3)">(для AI метаданных)</span></label>
@@ -267,6 +269,6 @@
 <button class="fab" id="fabAdd" title="Добавить видео на сегодня">＋</button>
 
 <div class="toast hidden" id="toast"></div>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>
