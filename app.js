@@ -770,6 +770,18 @@ async function init() {
   const add=(d,name)=>{const dt=new Date(base);dt.setDate(base.getDate()+d);FOOTBALL_EVENTS[fmtDate(dt)]=name;};
   add(3,'Финал Лиги Чемпионов');add(7,'Барселона — Реал');add(11,'Начало Copa América');add(18,'Финал Лиги Европы');
 
+  // ─── SETUP SCREEN — attach BEFORE any early return ───
+  document.getElementById('btnSaveSetup').addEventListener('click', ()=>{
+    const cid = document.getElementById('inputClientId').value.trim();
+    const ckey = document.getElementById('inputClaudeKey').value.trim();
+    if (!cid) { showToast('Введи Client ID', true); return; }
+    cfg.clientId = cid;
+    if (ckey) cfg.claudeKey = ckey;
+    saveStorage();
+    initAppListeners();
+    showApp();
+  });
+
   // Handle OAuth callback
   const urlParams = new URLSearchParams(window.location.search);
   const code = urlParams.get('code');
@@ -778,24 +790,18 @@ async function init() {
     window.history.replaceState({}, '', window.location.pathname);
     if (cfg.clientId) {
       const ok = await handleOAuthCallback(code);
-      if (ok) { showApp(); return; }
+      if (ok) { initAppListeners(); showApp(); return; }
     }
   }
 
   // Decide screen
   if (!cfg.clientId) { showSetup(); return; }
+  initAppListeners();
   showApp();
 
-  // ─── SETUP SCREEN ───
-  document.getElementById('btnSaveSetup').addEventListener('click', ()=>{
-    const cid = document.getElementById('inputClientId').value.trim();
-    const ckey = document.getElementById('inputClaudeKey').value.trim();
-    if (!cid) { showToast('Введи Client ID', true); return; }
-    cfg.clientId = cid;
-    if (ckey) cfg.claudeKey = ckey;
-    saveStorage();
-    showApp();
-  });
+function initAppListeners() {
+  if (window._listenersInited) return;
+  window._listenersInited = true;
 
   // ─── SIDEBAR ───
   document.getElementById('btnAddChannel').addEventListener('click', startOAuth);
@@ -980,6 +986,6 @@ async function init() {
       location.reload();
     }
   });
-}
+} // end initAppListeners
 
 document.addEventListener('DOMContentLoaded', init);
