@@ -77,26 +77,38 @@ function showApp() {
 // No redirects — GIS handles auth in its own popup and returns
 // the access_token directly in a callback. Works on GitHub Pages.
 
-function gisTokenClient(hint, prompt, callback) {
-  if (typeof google === 'undefined' || !google.accounts) {
-    showToast('Библиотека Google ещё загружается, подожди секунду', true);
-    return null;
-  }
-  return google.accounts.oauth2.initTokenClient({
-    client_id: cfg.clientId,
-    scope: YT_SCOPES,
-    hint: hint || '',
-    prompt: prompt,
-    callback,
+// Wait for GIS library to finish loading (it's loaded async)
+function waitForGIS(timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    if (typeof google !== 'undefined' && google.accounts) { resolve(); return; }
+    const start = Date.now();
+    const check = setInterval(() => {
+      if (typeof google !== 'undefined' && google.accounts) { clearInterval(check); resolve(); }
+      else if (Date.now() - start > timeout) { clearInterval(check); reject(new Error('timeout')); }
+    }, 100);
   });
 }
 
 async function startOAuth() {
   if (!cfg.clientId) { showToast('Сначала введи Client ID в настройках', true); return; }
 
-  const client = gisTokenClient('', 'select_account', async (response) => {
+  showToast('Загружаю Google Auth...');
+  try { await waitForGIS(); } catch(e) {
+    showToast('Не удалось загрузить Google Auth. Проверь интернет-соединение.', true); return;
+  }
+
+  const ERROR_HINTS = {
+    'idpiframe_initialization_failed': '❌ Добавь https://mirasomarov.github.io в Authorized JavaScript origins в Google Cloud Console',
+    'popup_closed_by_user':            'Окно закрыто. Попробуй снова.',
+    'access_denied':                   '❌ Доступ запрещён. Убедись что твой аккаунт добавлен как Test User в OAuth Consent Screen.',
+    'immediate_failed':                'Требуется повторная авторизация.',
+  };
+
+  const onToken = async (response) => {
     if (response.error) {
-      showToast('Ошибка авторизации: ' + response.error, true);
+      const hint = ERROR_HINTS[response.error] || ('Ошибка: ' + response.error);
+      showToast(hint, true);
+      console.error('GIS error:', response);
       return;
     }
     const token     = response.access_token;
@@ -104,7 +116,7 @@ async function startOAuth() {
 
     showToast('Получаю информацию о канале...');
     const chInfo = await fetchChannelInfo(token);
-    if (!chInfo) { showToast('Не удалось получить данные канала', true); return; }
+    if (!chInfo) { showToast('Не удалось получить данные канала. Проверь что YouTube Data API v3 включён.', true); return; }
 
     const colorIdx = channels.length % 4;
     const idx      = channels.findIndex(c => c.id === chInfo.id);
@@ -118,9 +130,20 @@ async function startOAuth() {
     saveStorage();
     showToast('✅ Канал "' + chInfo.title + '" подключён!');
     renderChannelList(); renderChannelsSettings(); renderCalendar();
-  });
+  };
 
-  if (client) client.requestAccessToken();
+  try {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: cfg.clientId,
+      scope: YT_SCOPES,
+      prompt: 'select_account',
+      callback: onToken,
+    });
+    client.requestAccessToken();
+  } catch(e) {
+    showToast('Ошибка инициализации Google Auth: ' + e.message, true);
+    console.error(e);
+  }
 }
 
 async function fetchChannelInfo(token) {
@@ -141,17 +164,25 @@ async function getValidToken(channelId) {
   if (Date.now() < ch.tokenExpiry - 60000) return ch.token;
 
   // Token expired — silently re-request via GIS (no redirect, no prompt if possible)
+  try { await waitForGIS(); } catch(e) { return null; }
   return new Promise((resolve) => {
     showToast('Обновляю токен для "' + ch.title + '"...');
-    const client = gisTokenClient(ch.id, '', async (response) => {
-      if (response.error || !response.access_token) { resolve(null); return; }
-      ch.token      = response.access_token;
-      ch.tokenExpiry = Date.now() + (parseInt(response.expires_in) || 3600) * 1000;
-      saveStorage();
-      resolve(ch.token);
-    });
-    if (client) client.requestAccessToken({ prompt: '' });
-    else resolve(null);
+    try {
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: cfg.clientId,
+        scope: YT_SCOPES,
+        hint: ch.id,
+        prompt: '',
+        callback: (response) => {
+          if (response.error || !response.access_token) { resolve(null); return; }
+          ch.token       = response.access_token;
+          ch.tokenExpiry = Date.now() + (parseInt(response.expires_in) || 3600) * 1000;
+          saveStorage();
+          resolve(ch.token);
+        },
+      });
+      client.requestAccessToken();
+    } catch(e) { resolve(null); }
   });
 }
 
