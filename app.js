@@ -85,7 +85,11 @@ async function startOAuth() {
   const verifier  = b64url(crypto.getRandomValues(new Uint8Array(32)));
   const hashBuf   = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
   const challenge = b64url(hashBuf);
+  // Store verifier in MAIN window's sessionStorage (popup cannot access it)
   sessionStorage.setItem('pkce_v', verifier);
+  // Clear any stale return value
+  localStorage.removeItem('yt_oauth_return');
+
   const p = new URLSearchParams({
     client_id: cfg.clientId,
     redirect_uri: REDIRECT_URI,
@@ -97,35 +101,46 @@ async function startOAuth() {
     prompt: 'consent select_account',
   });
 
-  // Open OAuth in a popup — main page stays open
-  const w = 500, h = 650;
-  const left = Math.round(screen.width / 2 - w / 2);
+  const w = 500, h = 660;
+  const left = Math.round(screen.width  / 2 - w / 2);
   const top  = Math.round(screen.height / 2 - h / 2);
   const popup = window.open(
     'https://accounts.google.com/o/oauth2/v2/auth?' + p,
     'yt_oauth',
-    `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`
+    `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`
   );
 
   if (!popup) {
-    showToast('⚠️ Разреши всплывающие окна для этого сайта и попробуй снова', true);
+    showToast('⚠️ Разреши всплывающие окна для этого сайта, затем повтори', true);
     return;
   }
 
-  showToast('Открываю окно авторизации Google...');
+  showToast('🔑 Войди в Google в открывшемся окне...');
 
-  // Receive the auth code from the popup via postMessage
-  const handler = async (event) => {
-    if (event.origin !== window.location.origin) return;
-    if (!event.data || event.data.type !== 'yt_oauth_code') return;
-    window.removeEventListener('message', handler);
-    const { code } = event.data;
-    if (code) {
-      const ok = await handleOAuthCallback(code);
-      if (ok) { renderChannelList(); renderChannelsSettings(); renderCalendar(); }
+  // Poll localStorage every 500 ms — popup writes code there after redirect
+  let done = false;
+  const poll = setInterval(async () => {
+    // Check localStorage for code written by the popup
+    const raw = localStorage.getItem('yt_oauth_return');
+    if (raw) {
+      localStorage.removeItem('yt_oauth_return');
+      clearInterval(poll);
+      done = true;
+      try {
+        const { code } = JSON.parse(raw);
+        if (code) {
+          const ok = await handleOAuthCallback(code);
+          if (ok) { renderChannelList(); renderChannelsSettings(); renderCalendar(); }
+        }
+      } catch(e) { showToast('Ошибка OAuth', true); }
+      return;
     }
-  };
-  window.addEventListener('message', handler);
+    // Stop polling if user closed popup without logging in
+    if (popup.closed && !done) {
+      clearInterval(poll);
+      showToast('Авторизация отменена', true);
+    }
+  }, 500);
 }
 
 async function handleOAuthCallback(code) {
@@ -712,13 +727,40 @@ function updateTitleCounter() {
 
 // ─── MAIN INIT ───────────────────────────────────────────
 async function init() {
-  // If we're the OAuth popup callback page — send code to parent & close
   const params = new URLSearchParams(window.location.search);
   const code   = params.get('code');
-  if (code && window.opener && !window.opener.closed) {
-    window.opener.postMessage({ type: 'yt_oauth_code', code }, window.location.origin);
+
+  // ── OAuth popup callback: write code to localStorage then close ──
+  if (code) {
+    // Clean the URL immediately so no double-processing
+    window.history.replaceState({}, '', window.location.pathname);
+
+    // Write code for the main window's polling loop
+    try { localStorage.setItem('yt_oauth_return', JSON.stringify({ code, ts: Date.now() })); } catch(e) {}
+
+    // Attempt to close the popup window
     window.close();
-    return; // stop — this tab is the popup, parent handles everything
+
+    // If window didn't close (wasn't a popup / browser blocked it),
+    // show a success message and let the user navigate back manually.
+    document.body.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:center;
+                  height:100vh;background:#0f0f13;color:#fff;
+                  font-family:Inter,sans-serif;text-align:center;padding:24px">
+        <div>
+          <div style="font-size:3rem;margin-bottom:16px">✅</div>
+          <div style="font-size:1.2rem;font-weight:600;margin-bottom:8px">Авторизация успешна!</div>
+          <div style="color:#aaa;font-size:.9rem;margin-bottom:24px">
+            Вернись на вкладку с приложением — канал уже добавлен.
+          </div>
+          <a href="${window.location.pathname}"
+             style="background:#ff3e3e;color:#fff;padding:10px 24px;
+                    border-radius:8px;text-decoration:none;font-weight:600">
+            Открыть приложение →
+          </a>
+        </div>
+      </div>`;
+    return;
   }
 
   loadStorage();
