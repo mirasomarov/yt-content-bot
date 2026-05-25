@@ -1,769 +1,985 @@
-/* =========================================================
-   YouTube Content Bot — App Logic
-   ========================================================= */
-
+/* ========================================================
+   YouTube Content Bot — Full App
+   YouTube Data API v3 + OAuth 2.0 PKCE + Claude AI
+   ======================================================== */
 'use strict';
 
-// ─── STATE ───────────────────────────────────────────────
-const STATE_KEY = 'yt_content_bot_v1';
+// ─── CONFIG ──────────────────────────────────────────────
+const REDIRECT_URI = (() => {
+  const u = window.location.origin + window.location.pathname.replace(/\/$/, '') + '/';
+  return u.endsWith('/') ? u : u + '/';
+})();
 
-let state = {
-  publications: [],     // { id, date, channel, type, title, time, status }
-  currentWeekOffset: 0,
+const YT_SCOPES = [
+  'https://www.googleapis.com/auth/youtube',
+  'https://www.googleapis.com/auth/youtube.upload',
+].join(' ');
+
+const FOOTBALL_EVENTS = {
+  // auto-seeded relative to today
 };
 
-function loadState() {
+const CH_COLORS = ['ch-0','ch-1','ch-2','ch-3'];
+const CH_DOT_COLORS = ['var(--hub)','var(--ballers)','var(--yamal)','var(--green)'];
+
+// ─── STATE ───────────────────────────────────────────────
+let cfg = {};        // { clientId, claudeKey }
+let channels = [];   // [{ id, title, thumbnail, token, refreshToken, tokenExpiry, colorIdx }]
+let videos = [];     // [{ id, channelId, title, date, time, type, status, ytVideoId, ytUrl }]
+let currentView = 'month';
+let calOffset = 0;   // months/weeks offset from today
+let pendingUpload = { file: null, date: null };
+let currentTags = [];
+
+function loadStorage() {
   try {
-    const raw = localStorage.getItem(STATE_KEY);
-    if (raw) {
-      const saved = JSON.parse(raw);
-      state.publications = saved.publications || [];
-    }
-  } catch (_) {}
-  seedDemoData();
+    cfg      = JSON.parse(localStorage.getItem('ytbot_cfg') || '{}');
+    channels = JSON.parse(localStorage.getItem('ytbot_channels') || '[]');
+    videos   = JSON.parse(localStorage.getItem('ytbot_videos') || '[]');
+  } catch(_) { cfg={}; channels=[]; videos=[]; }
 }
-
-function saveState() {
-  localStorage.setItem(STATE_KEY, JSON.stringify(state));
-}
-
-// ─── SEED DEMO DATA ──────────────────────────────────────
-function seedDemoData() {
-  if (state.publications.length > 0) return;
-
-  const today = new Date();
-  const demos = [
-    { daysOffset: -2, channel: 'hub',     type: 'long',  title: 'ТОП-10 финтов недели',              time: '16:00', status: 'published' },
-    { daysOffset: -1, channel: 'ballers', type: 'short', title: 'Мбаппе vs Ямаль — кто лучше?',      time: '09:00', status: 'published' },
-    { daysOffset:  0, channel: 'yamal',   type: 'long',  title: 'Ямаль — Король Ла Лиги 2025',        time: '17:00', status: 'planned'   },
-    { daysOffset:  0, channel: 'hub',     type: 'short', title: 'Лучший финт месяца #Shorts',          time: '12:00', status: 'planned'   },
-    { daysOffset:  1, channel: 'ballers', type: 'long',  title: 'Холанд: все голы за сезон',           time: '16:00', status: 'planned'   },
-    { daysOffset:  2, channel: 'yamal',   type: 'short', title: 'Ямаль дриблинг компиляция',           time: '10:00', status: 'planned'   },
-    { daysOffset:  3, channel: 'hub',     type: 'post',  title: 'Опрос: лучший финт недели',           time: '14:00', status: 'planned'   },
-    { daysOffset:  4, channel: 'ballers', type: 'short', title: 'Топ голы Лиги Чемпионов',             time: '11:00', status: 'planned'   },
-    { daysOffset:  5, channel: 'hub',     type: 'long',  title: 'Топ-5 бегущих игроков сезона',        time: '16:00', status: 'planned'   },
-  ];
-
-  demos.forEach(d => {
-    const date = new Date(today);
-    date.setDate(date.getDate() + d.daysOffset);
-    state.publications.push({
-      id: uid(),
-      date: formatDate(date),
-      channel: d.channel,
-      type: d.type,
-      title: d.title,
-      time: d.time,
-      status: d.status,
-    });
-  });
-
-  saveState();
+function saveStorage() {
+  localStorage.setItem('ytbot_cfg',      JSON.stringify(cfg));
+  localStorage.setItem('ytbot_channels', JSON.stringify(channels));
+  localStorage.setItem('ytbot_videos',   JSON.stringify(videos));
 }
 
 // ─── UTILS ───────────────────────────────────────────────
-function uid() { return Math.random().toString(36).slice(2, 9); }
-
-function formatDate(d) {
+function uid() { return Math.random().toString(36).slice(2,11); }
+function fmtDate(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
-
-function parseDate(s) {
-  const [y,m,d] = s.split('-').map(Number);
-  return new Date(y, m-1, d);
+function today() { return fmtDate(new Date()); }
+function parseDate(s) { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); }
+const MONTHS_RU = ['Январь','Февраль','Март','Апрель','Май','Июнь','Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+const DAYS_RU   = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+const MONTHS_SHORT = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+function fmtSize(bytes) {
+  if (bytes < 1e6) return (bytes/1e3).toFixed(1)+' KB';
+  if (bytes < 1e9) return (bytes/1e6).toFixed(1)+' MB';
+  return (bytes/1e9).toFixed(2)+' GB';
 }
-
-function russianWeekday(i) {
-  return ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'][i];
-}
-
-function russianMonth(m) {
-  return ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'][m];
-}
-
-function showToast(msg, color = 'var(--green)') {
+function showToast(msg, isError=false) {
   const t = document.getElementById('toast');
   t.textContent = msg;
-  t.style.borderLeftColor = color;
-  t.classList.remove('hidden');
-  clearTimeout(t._to);
-  t._to = setTimeout(() => t.classList.add('hidden'), 2800);
+  t.className = 'toast' + (isError ? ' error' : '');
+  clearTimeout(t._t);
+  t._t = setTimeout(()=>t.classList.add('hidden'), 3200);
 }
 
-function channelName(c) {
-  return { hub: 'Hub of Ballers', ballers: 'BaIIersHub', yamal: 'YamalPedia' }[c] || c;
+// ─── SCREENS ─────────────────────────────────────────────
+function showSetup() {
+  document.getElementById('screen-setup').classList.remove('hidden');
+  document.getElementById('screen-app').classList.add('hidden');
+  document.getElementById('redirectUriHint').textContent = REDIRECT_URI;
 }
-
-function typeName(t) {
-  return { long: 'Лонг', short: 'Short', post: 'Пост' }[t] || t;
-}
-
-// ─── TAB NAVIGATION ──────────────────────────────────────
-const TABS = ['schedule','metadata','contentplan','analytics'];
-const TITLES = {
-  schedule:    'Расписание публикаций',
-  metadata:    'Мета-генератор (AI)',
-  contentplan: 'Контент-план (AI)',
-  analytics:   'Аналитика',
-};
-
-function switchTab(name) {
-  TABS.forEach(t => {
-    document.getElementById(`tab-${t}`).classList.remove('active');
-    document.querySelector(`[data-tab="${t}"]`).classList.remove('active');
-  });
-  document.getElementById(`tab-${name}`).classList.add('active');
-  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
-  document.getElementById('pageTitle').textContent = TITLES[name];
-
-  if (name === 'analytics') renderAnalytics();
-}
-
-// ─── SCHEDULE / CALENDAR ─────────────────────────────────
-function getWeekDates(offset = 0) {
-  const today = new Date();
-  const dow = today.getDay(); // 0=Sun
-  const monday = new Date(today);
-  monday.setDate(today.getDate() - (dow === 0 ? 6 : dow - 1) + offset * 7);
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    return d;
-  });
-}
-
-const FOOTBALL_EVENTS = {
-  // format: 'YYYY-MM-DD': 'event name'
-};
-
-// Generate some events around today
-(function seedEvents() {
-  const base = new Date();
-  const add = (d, name) => {
-    const dt = new Date(base);
-    dt.setDate(base.getDate() + d);
-    FOOTBALL_EVENTS[formatDate(dt)] = name;
-  };
-  add(2,  'Финал Лиги Чемпионов');
-  add(5,  'Начало Copa América');
-  add(9,  'Матч Барселона — Реал Мадрид');
-  add(12, 'Открытие трансферного окна');
-  add(16, 'Финал Лиги Европы');
-})();
-
-function renderCalendar() {
-  const days = getWeekDates(state.currentWeekOffset);
-  const today = formatDate(new Date());
-
-  // Update week label
-  const first = days[0], last = days[6];
-  document.getElementById('weekLabel').textContent =
-    `${first.getDate()} ${russianMonth(first.getMonth())} — ${last.getDate()} ${russianMonth(last.getMonth())} ${last.getFullYear()}`;
-
-  const grid = document.getElementById('calendarGrid');
-  grid.innerHTML = '';
-
-  let weekCount = 0;
-
-  days.forEach(day => {
-    const ds = formatDate(day);
-    const isToday = ds === today;
-    const event = FOOTBALL_EVENTS[ds];
-    const pubs = state.publications.filter(p => p.date === ds)
-                   .sort((a,b) => a.time.localeCompare(b.time));
-
-    if (ds >= formatDate(new Date()) || state.currentWeekOffset >= 0) {
-      weekCount += pubs.filter(p => p.status === 'planned' || p.status === 'published').length;
-    }
-
-    const col = document.createElement('div');
-    col.className = `cal-day${isToday ? ' is-today' : ''}${event ? ' is-event' : ''}`;
-    col.dataset.date = ds;
-
-    const numEl = isToday
-      ? `<div class="cal-day-num">${day.getDate()}</div>`
-      : `<span class="cal-day-num">${day.getDate()}</span>`;
-
-    col.innerHTML = `
-      <div class="cal-day-header">
-        <span class="cal-day-name">${russianWeekday(day.getDay())}</span>
-        ${numEl}
-      </div>
-      ${event ? `<span class="event-flag">⚡ ${event}</span>` : ''}
-    `;
-
-    pubs.forEach(p => {
-      const item = document.createElement('div');
-      item.className = `pub-item ch-${p.channel} status-${p.status}`;
-      item.title = `${channelName(p.channel)} · ${typeName(p.type)} · ${p.status}`;
-      item.innerHTML = `
-        <span class="pub-name">${p.title}</span>
-        <span class="pub-time">${p.time} · <span class="badge badge-${p.type}">${typeName(p.type)}</span></span>
-        <button class="pub-delete" data-id="${p.id}">✕</button>
-      `;
-      col.appendChild(item);
-    });
-
-    col.addEventListener('click', e => {
-      if (e.target.classList.contains('pub-delete')) {
-        const id = e.target.dataset.id;
-        state.publications = state.publications.filter(p => p.id !== id);
-        saveState();
-        renderCalendar();
-        showToast('Публикация удалена');
-        return;
-      }
-      // Click on day → open add modal with pre-filled date
-      document.getElementById('addDate').value = ds;
-      document.getElementById('addModal').classList.remove('hidden');
-    });
-
-    grid.appendChild(col);
-  });
-
-  document.getElementById('weekCount').textContent = state.publications.filter(p => {
-    const dates = days.map(formatDate);
-    return dates.includes(p.date);
-  }).length;
-}
-
-// ─── ADD PUBLICATION MODAL ───────────────────────────────
-function openAddModal() {
-  const today = formatDate(new Date());
-  document.getElementById('addDate').value = today;
-  document.getElementById('addModal').classList.remove('hidden');
-}
-
-function closeModal() {
-  document.getElementById('addModal').classList.add('hidden');
-}
-
-function confirmAdd() {
-  const date    = document.getElementById('addDate').value;
-  const channel = document.getElementById('addChannel').value;
-  const type    = document.getElementById('addType').value;
-  const title   = document.getElementById('addTitle').value.trim();
-  const time    = document.getElementById('addTime').value;
-  const status  = document.getElementById('addStatus').value;
-
-  if (!date || !title) { showToast('Заполни дату и название!', 'var(--accent)'); return; }
-
-  state.publications.push({ id: uid(), date, channel, type, title, time, status });
-  saveState();
-  closeModal();
+function showApp() {
+  document.getElementById('screen-setup').classList.add('hidden');
+  document.getElementById('screen-app').classList.remove('hidden');
+  renderChannelList();
   renderCalendar();
-  showToast('✅ Публикация добавлена!');
-  document.getElementById('addTitle').value = '';
 }
 
-// ─── METADATA GENERATOR (simulated AI) ───────────────────
-const META_TEMPLATES = {
-  hub: {
-    long: {
-      titles: [
-        'ТОП-10 финтов {idea} — Лучшее за 2025',
-        '{idea} | Невероятные моменты #Football',
-        'Невозможные финты: {idea} | ТОП компиляция',
-      ],
-      hooks: [
-        'Ты не поверишь, что этот игрок сделал на {min} минуте…',
-        'Один финт — и стадион встал. Смотри на {sec} секунде.',
-        'Если это не войдёт в топ года — я удаляю канал.',
-      ],
-    },
-    short: {
-      titles: [
-        '{idea} #Shorts #Football',
-        'Это за 60 секунд изменит твой взгляд на футбол 🔥 #{hashtag}',
-        '{idea} | Момент на миллион #Reels',
-      ],
-      hooks: [
-        'Досмотри до конца — там кое-что НЕРЕАЛЬНОЕ 🤯',
-        'За 30 секунд покажу лучший момент недели.',
-        'Стоп. Посмотри на это.',
-      ],
-    },
-    post: {
-      titles: ['Опрос: {idea}', 'Ваше мнение: {idea}'],
-      hooks: ['Выбери вариант ниже 👇', 'Отвечайте в комментариях!'],
-    },
-  },
-  ballers: {
-    long: {
-      titles: [
-        '{idea} — Все голы и ассисты | Компиляция 2025',
-        'Почему {idea} лучший в мире прямо сейчас',
-        '{idea} | Полная карьерная нарезка',
-      ],
-      hooks: [
-        'Этот игрок переписал историю. Вот доказательства.',
-        'Один сезон — {num} голов. Смотри полную нарезку.',
-        'Мы собрали ВСЕ его лучшие моменты. Все.',
-      ],
-    },
-    short: {
-      titles: ['{idea} 🔥 #Shorts', '{idea} моменты #Football #Shorts'],
-      hooks: ['60 секунд гениального футбола.', 'Этот момент будут помнить годами.'],
-    },
-    post: {
-      titles: ['Кто лучше: {idea}?', '{idea} — ваше мнение?'],
-      hooks: ['Голосуй прямо сейчас 👇', 'Расскажи в комментариях!'],
-    },
-  },
-  yamal: {
-    long: {
-      titles: [
-        'Lamine Yamal: {idea} | ПОЛНАЯ нарезка 2025',
-        'Ямаль — {idea} | Почему он лучший в 17 лет',
-        '{idea}: Ямаль против всего мира',
-      ],
-      hooks: [
-        'В 17 лет сделать это — просто невозможно. Но он сделал.',
-        'Ямаль снова доказал, что он феномен поколения.',
-        'Этот момент Ямаля войдёт в историю.',
-      ],
-    },
-    short: {
-      titles: ['Ямаль снова шокировал всех 😱 #Shorts', '{idea} — Ямаль #YamalPedia #Shorts'],
-      hooks: ['Посмотри что он сделал за 5 секунд.', 'Ямаль в 17 лет vs легенды футбола.'],
-    },
-    post: {
-      titles: ['Ямаль лучший в мире? {idea}', 'Ваше мнение о Ямале: {idea}'],
-      hooks: ['Голосуй 👇', 'Комментируй!'],
-    },
-  },
-};
+// ─── OAUTH 2.0 PKCE ──────────────────────────────────────
+function b64url(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,'');
+}
+function genVerifier() {
+  return b64url(crypto.getRandomValues(new Uint8Array(32)));
+}
+async function genChallenge(verifier) {
+  const data = new TextEncoder().encode(verifier);
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  return b64url(hash);
+}
 
-const TAGS_POOL = {
-  hub: ['football', 'skills', 'фины', 'футбол', 'топфутбол', 'hubofballers', 'skills2025', 'footballskills', 'freeestyle', 'topskills'],
-  ballers: ['mbappe', 'haaland', 'yamal', 'highlights', 'football2025', 'лигачемпионов', 'топголы', 'ballers', 'топигроки', 'компиляция'],
-  yamal: ['yamal', 'ламинямаль', 'яамальпедиа', 'барселона', 'лалига', 'yamal2025', 'lamineяamal', 'футбольныйгений', 'топ17лет', 'yamalgoals'],
-};
+async function startOAuth() {
+  if (!cfg.clientId) { showToast('Сначала введи Google Client ID в настройках', true); return; }
+  const verifier = genVerifier();
+  const challenge = await genChallenge(verifier);
+  sessionStorage.setItem('pkce_verifier', verifier);
+  sessionStorage.setItem('oauth_state', uid());
 
-const THUMBNAILS = [
-  'Крупный план игрока в прыжке, яркий неоновый фон, большой текст с цифрой/словом сверху',
-  'Split-screen: игрок слева + реакция фаната справа, тёмный фон с красным градиентом',
-  'Лицо игрока крупным планом (удивление/злость), текст снизу жирным шрифтом на чёрном',
-  'Эффект "огонь" за игроком на тёмном фоне, цифра результата в углу',
-];
+  const params = new URLSearchParams({
+    client_id: cfg.clientId,
+    redirect_uri: REDIRECT_URI,
+    response_type: 'code',
+    scope: YT_SCOPES,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    access_type: 'offline',
+    prompt: 'consent select_account',
+    state: sessionStorage.getItem('oauth_state'),
+  });
+  window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+}
 
-const TIMES_BY_TYPE = {
-  long: ['16:00', '17:00', '18:00', '19:00'],
-  short: ['09:00', '10:00', '11:00', '12:00'],
-  post: ['14:00', '15:00'],
-};
+async function handleOAuthCallback(code) {
+  const verifier = sessionStorage.getItem('pkce_verifier');
+  if (!verifier || !cfg.clientId) return false;
 
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function rand(a, b) { return Math.floor(Math.random() * (b - a + 1)) + a; }
+  showToast('Получаю токены...');
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: cfg.clientId,
+      code,
+      code_verifier: verifier,
+      grant_type: 'authorization_code',
+      redirect_uri: REDIRECT_URI,
+    }),
+  });
 
-function generateMetadata(channel, type, idea, lang) {
-  const tmpl = META_TEMPLATES[channel]?.[type] || META_TEMPLATES.hub.long;
-  const raw = idea.length > 30 ? idea.slice(0, 28) + '…' : idea;
+  const tokens = await res.json();
+  if (tokens.error) { showToast('Ошибка OAuth: ' + tokens.error_description, true); return false; }
 
-  let title = pick(tmpl.titles)
-    .replace('{idea}', raw)
-    .replace('{hashtag}', channel === 'yamal' ? 'Yamal' : 'Football')
-    .slice(0, 70);
+  sessionStorage.removeItem('pkce_verifier');
+  sessionStorage.removeItem('oauth_state');
 
-  let hook = pick(tmpl.hooks)
-    .replace('{min}', rand(23, 87))
-    .replace('{sec}', rand(5, 25))
-    .replace('{num}', rand(20, 54));
+  // Fetch channel info
+  const chInfo = await fetchChannelInfo(tokens.access_token);
+  if (!chInfo) { showToast('Не удалось получить данные канала', true); return false; }
 
-  const tags = TAGS_POOL[channel]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, 10);
+  const colorIdx = channels.length % CH_COLORS.length;
+  const existing = channels.findIndex(c => c.id === chInfo.id);
+  const channelData = {
+    id: chInfo.id,
+    title: chInfo.title,
+    thumbnail: chInfo.thumbnail,
+    token: tokens.access_token,
+    refreshToken: tokens.refresh_token || null,
+    tokenExpiry: Date.now() + (tokens.expires_in * 1000),
+    colorIdx,
+  };
 
-  const timeOptions = TIMES_BY_TYPE[type] || ['16:00'];
-  const recTime = pick(timeOptions);
+  if (existing >= 0) channels[existing] = channelData;
+  else channels.push(channelData);
 
-  let desc = '';
-  if (lang === 'ru') {
-    desc = `${idea.slice(0, 80)} — смотри полную нарезку на канале ${channelName(channel)}! Подписывайся чтобы не пропустить лучшие моменты. #football #${channel}`;
-  } else {
-    desc = `${idea.slice(0, 80)} — full compilation on ${channelName(channel)}! Subscribe for more football highlights. #football #${channel}`;
+  saveStorage();
+  showToast(`✅ Канал "${chInfo.title}" подключён!`);
+  return true;
+}
+
+async function fetchChannelInfo(token) {
+  try {
+    const res = await fetch(
+      'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true',
+      { headers: { Authorization: 'Bearer ' + token } }
+    );
+    const data = await res.json();
+    if (!data.items?.length) return null;
+    const ch = data.items[0];
+    return {
+      id: ch.id,
+      title: ch.snippet.title,
+      thumbnail: ch.snippet.thumbnails?.default?.url || '',
+    };
+  } catch(e) { return null; }
+}
+
+async function refreshToken(channel) {
+  if (!channel.refreshToken || !cfg.clientId) return null;
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: cfg.clientId,
+      grant_type: 'refresh_token',
+      refresh_token: channel.refreshToken,
+    }),
+  });
+  const tokens = await res.json();
+  if (tokens.access_token) {
+    channel.token = tokens.access_token;
+    channel.tokenExpiry = Date.now() + (tokens.expires_in * 1000);
+    saveStorage();
+    return tokens.access_token;
+  }
+  return null;
+}
+
+async function getValidToken(channelId) {
+  const ch = channels.find(c => c.id === channelId);
+  if (!ch) return null;
+  if (Date.now() < ch.tokenExpiry - 60000) return ch.token;
+  return await refreshToken(ch);
+}
+
+// ─── YOUTUBE UPLOAD ──────────────────────────────────────
+async function uploadToYouTube(channelId, file, metadata) {
+  const token = await getValidToken(channelId);
+  if (!token) { showToast('Нет токена. Подключи канал заново.', true); return null; }
+
+  // Build publishAt (UTC)
+  let publishAt = null;
+  let privacyStatus = metadata.privacy;
+  if (metadata.privacy === 'scheduled' && metadata.date && metadata.time) {
+    // Convert GMT+5 to UTC
+    const localDt = new Date(`${metadata.date}T${metadata.time}:00+05:00`);
+    publishAt = localDt.toISOString();
+    privacyStatus = 'private'; // YouTube requires private for scheduled
   }
 
-  desc = desc.slice(0, 200);
+  const snippet = {
+    title: metadata.title.slice(0, 100),
+    description: metadata.description,
+    tags: metadata.tags,
+    categoryId: '17', // Sports
+  };
+  const status = { privacyStatus };
+  if (publishAt) status.publishAt = publishAt;
 
-  return { title, hook, desc, tags, thumbnail: pick(THUMBNAILS), recTime };
+  // Step 1: Initiate resumable upload
+  let uploadUrl;
+  try {
+    const initRes = await fetch(
+      'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Content-Type': 'application/json',
+          'X-Upload-Content-Type': file.type || 'video/mp4',
+          'X-Upload-Content-Length': String(file.size),
+        },
+        body: JSON.stringify({ snippet, status }),
+      }
+    );
+    if (!initRes.ok) {
+      const err = await initRes.json().catch(()=>({}));
+      throw new Error(err.error?.message || initRes.status);
+    }
+    uploadUrl = initRes.headers.get('Location');
+    if (!uploadUrl) throw new Error('Нет upload URL');
+  } catch(e) {
+    showToast('Ошибка инициализации загрузки: ' + e.message, true);
+    return null;
+  }
+
+  // Step 2: Upload in chunks
+  const CHUNK = 5 * 1024 * 1024; // 5MB
+  let offset = 0;
+  let videoId = null;
+
+  while (offset < file.size) {
+    const end = Math.min(offset + CHUNK, file.size);
+    const chunk = file.slice(offset, end);
+
+    try {
+      const uploadRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': file.type || 'video/mp4',
+          'Content-Range': `bytes ${offset}-${end-1}/${file.size}`,
+        },
+        body: chunk,
+      });
+
+      if (uploadRes.status === 200 || uploadRes.status === 201) {
+        const data = await uploadRes.json();
+        videoId = data.id;
+        break;
+      } else if (uploadRes.status === 308) {
+        // Chunk received, continue
+        const range = uploadRes.headers.get('Range');
+        offset = range ? parseInt(range.split('-')[1]) + 1 : end;
+      } else {
+        throw new Error('Статус: ' + uploadRes.status);
+      }
+    } catch(e) {
+      showToast('Ошибка загрузки чанка: ' + e.message, true);
+      return null;
+    }
+
+    const pct = Math.round((offset / file.size) * 100);
+    updateProgress(pct);
+    offset = Math.max(offset, end);
+  }
+
+  updateProgress(100);
+  return videoId;
 }
 
-let lastGeneratedMeta = null;
+function updateProgress(pct) {
+  document.getElementById('progressBar').style.width = pct + '%';
+  document.getElementById('progressPct').textContent = pct + '%';
+  if (pct >= 100) document.getElementById('progressSub').textContent = 'Завершаю...';
+}
 
-async function handleGenerateMeta() {
-  const channel = document.getElementById('metaChannel').value;
-  const type    = document.getElementById('metaType').value;
-  const idea    = document.getElementById('metaIdea').value.trim();
-  const lang    = document.getElementById('metaLang').value;
+// ─── AI METADATA GENERATION ──────────────────────────────
+async function generateMetadata(channel, type, filename) {
+  const idea = filename.replace(/\.[^/.]+$/, '').replace(/[_-]/g,' ');
 
-  if (!idea) { showToast('Введи идею видео!', 'var(--accent)'); return; }
+  if (cfg.claudeKey) {
+    try { return await generateWithClaude(channel, type, idea); } catch(e) {}
+  }
+  return generateWithTemplates(channel, type, idea);
+}
 
-  document.getElementById('metaResult').classList.add('hidden');
-  document.getElementById('metaSpinner').classList.remove('hidden');
+async function generateWithClaude(channel, type, idea) {
+  const typeNames = { long:'Лонг (полное видео)', short:'YouTube Short', post:'Пост/Community' };
+  const prompt = `Ты SEO-специалист YouTube для футбольного канала "${channel.title}".
+Тип видео: ${typeNames[type] || type}
+Идея/название: "${idea}"
 
-  // Simulate API delay
-  await new Promise(r => setTimeout(r, 1400 + Math.random() * 600));
+Верни ТОЛЬКО валидный JSON (без комментариев, без markdown):
+{
+  "title": "заголовок до 70 символов, кликбейтный, с эмодзи",
+  "description": "описание 150-200 символов, с ключевыми словами для SEO",
+  "tags": ["тег1","тег2","тег3","тег4","тег5","тег6","тег7","тег8","тег9","тег10"],
+  "hook": "хук для первых 5 секунд видео",
+  "thumbnail": "конкретная идея для превью (цвет фона, текст, позиция игрока)",
+  "time": "HH:MM"
+}`;
 
-  const meta = generateMetadata(channel, type, idea, lang);
-  lastGeneratedMeta = { ...meta, channel, type };
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': cfg.claudeKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 1024,
+      messages: [{ role:'user', content: prompt }],
+    }),
+  });
 
-  document.getElementById('metaSpinner').classList.add('hidden');
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  const text = data.content[0].text;
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('JSON not found');
+  return JSON.parse(match[0]);
+}
 
-  document.getElementById('resTitle').textContent     = meta.title;
-  document.getElementById('resHook').textContent      = meta.hook;
-  document.getElementById('resDesc').textContent      = meta.desc;
-  document.getElementById('resThumbnail').textContent = meta.thumbnail;
-  document.getElementById('resTime').textContent      = meta.recTime + ' GMT+5';
+const T_TITLES = [
+  '🔥 {idea} — ТОП компиляция {year}',
+  '😱 {idea} | Невозможное возможно',
+  '⚽ {idea} — Смотри до конца!',
+  '🚀 {idea} | Лучшее за {year}',
+  '💥 {idea} — Это должен видеть каждый',
+];
+const T_HOOKS = [
+  'То что произошло на {min}-й минуте изменило всё...',
+  'Ты не поверишь своим глазам. Досмотри до конца.',
+  'Один момент — стадион взорвался. Смотри.',
+  'Я не верил, что такое возможно в футболе.',
+];
+const T_TAGS = ['football','футбол','skills','highlights','топ','goals','голы','компиляция','football2025','топфутбол'];
+const T_THUMBS = [
+  'Тёмный фон, игрок в прыжке, неоновый текст сверху с числом/словом',
+  'Split-screen: игрок слева, реакция болельщика справа, красный градиент',
+  'Крупный план лица игрока (удивление), жирный текст снизу на чёрном фоне',
+  'Огненный эффект за игроком, тёмный фон, счёт матча в углу',
+];
 
-  const tagsWrap = document.getElementById('resTags');
-  tagsWrap.innerHTML = meta.tags.map(t => `<span class="tag">#${t}</span>`).join('');
-
-  document.getElementById('metaResult').classList.remove('hidden');
-  showToast('✅ Метаданные сгенерированы!');
+function pick(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+function generateWithTemplates(channel, type, idea) {
+  const year = new Date().getFullYear();
+  const min = Math.floor(Math.random()*70)+10;
+  const title = pick(T_TITLES)
+    .replace('{idea}', idea.slice(0,40))
+    .replace('{year}', year)
+    .slice(0,70);
+  const hook = pick(T_HOOKS).replace('{min}', min);
+  const tags = [...T_TAGS].sort(()=>Math.random()-.5).slice(0,10);
+  const typeMap = { long:'16:00', short:'10:00', post:'14:00' };
+  return {
+    title,
+    description: `${idea} — смотри полную нарезку на канале ${channel.title}! Подписывайся чтобы не пропустить лучшие моменты. #football #${channel.title.replace(/\s/g,'')}`.slice(0,200),
+    tags,
+    hook,
+    thumbnail: pick(T_THUMBS),
+    time: typeMap[type] || '16:00',
+  };
 }
 
 // ─── CONTENT PLAN GENERATOR ──────────────────────────────
-const PLAN_TEMPLATES = [
-  {
-    title: 'Лонг: топ-компиляция',
-    why: 'Высокий retention у компиляций — удерживает аудиторию и растит Watch Time',
-    typeWeights: ['long', 'long', 'short', 'short', 'short', 'post'],
-  },
-];
-
-const CONTENT_IDEAS = {
-  hub: [
-    'ТОП-10 финтов этой недели',
-    'Лучшие сейвы вратарей',
-    'Самые быстрые игроки в мире',
-    'Невероятные голы со штрафных',
-    'Финты, которые унизили соперника',
-  ],
-  ballers: [
-    'Все голы Мбаппе в этом сезоне',
-    'Холанд vs Мбаппе: кто лучше?',
-    'Лучшие моменты Реал Мадрид',
-    'Компиляция голов UCL 2025',
-    'ТОП ассисты сезона',
-  ],
-  yamal: [
-    'Ямаль: лучшие финты в Ла Лиге',
-    'Ямаль vs Роналду в 17 лет — сравнение',
-    'Все голы Ямаля за Барселону',
-    'Ямаль — будущий Балон д\'Ор?',
-    'Дриблинг Ямаля: невозможное возможно',
-  ],
+const PLAN_IDEAS = {
+  long:  ['ТОП-10 финтов недели','Лучшие голы месяца','Невозможные сейвы','Самые быстрые игроки','Лучшие угловые'],
+  short: ['Лучший финт 60 секунд','Гол с центра поля','Победный пенальти','Невероятный дриблинг','Магия вратаря'],
+  post:  ['Опрос: лучший игрок?','Угадай счёт!','Ваш любимый клуб','Предсказание матча','Лучший гол — голосуй!'],
 };
 
-const WHYS = {
-  long: 'Лонги в 16:00–19:00 дают максимальный охват в СНГ (GMT+5) в рабочее время',
-  short: 'Shorts утром 9–11:00 попадают в рекомендации до начала рабочего дня',
-  post: 'Community-посты усиливают вовлечённость и помогают алгоритму',
-};
-
-const STRAT_TIPS = [
-  '🎯 Публикуй Shorts сразу после матча — в первые 2 часа трафик в 3× выше обычного.',
-  '📈 Чередуй лонги и Shorts — алгоритм поощряет каналы с разнообразным контентом.',
-  '🔗 Анонсируй лонги через Community-посты за 2–4 часа до публикации.',
-  '⚡ Реагируй на трансферные новости в течение 1–2 часов — тогда твоё видео первым в тренде.',
-  '🌍 Для аудитории СНГ (GMT+5) пиковые часы: 16–20 часов по Алматы/Ташкенту.',
-];
-
-async function handleGeneratePlan() {
-  const period   = parseInt(document.getElementById('planPeriod').value);
-  const focus    = document.getElementById('planFocus').value.trim() || 'текущий сезон';
-  const selEl    = document.getElementById('planChannels');
-  const channels = Array.from(selEl.selectedOptions).map(o => o.value);
-
-  if (channels.length === 0) { showToast('Выбери хотя бы один канал!', 'var(--accent)'); return; }
-
-  document.getElementById('planResult').classList.add('hidden');
-  document.getElementById('planSpinner').classList.remove('hidden');
-
-  await new Promise(r => setTimeout(r, 1800 + Math.random() * 800));
-
-  document.getElementById('planSpinner').classList.add('hidden');
-
+function generateContentPlan(period, focus, targetChannels) {
   const today = new Date();
-  const days = Array.from({ length: period }, (_, i) => {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    return d;
-  });
+  let days = 7;
+  if (period==='month') days=30;
+  if (period==='year') days=365;
 
-  let totalPubs = 0;
-  let shortCount = 0, longCount = 0, postCount = 0;
+  const plan = [];
+  for (let i=0; i<days; i++) {
+    const d = new Date(today); d.setDate(today.getDate()+i);
+    const ds = fmtDate(d);
+    const isWeekend = d.getDay()===0 || d.getDay()===6;
 
-  const dayPlans = days.map(day => {
-    const ds = formatDate(day);
-    const event = FOOTBALL_EVENTS[ds];
-    const dow = day.getDay(); // 0=Sun,6=Sat
-    const isWeekend = dow === 0 || dow === 6;
+    targetChannels.forEach(ch => {
+      const type = isWeekend
+        ? (Math.random()<.6 ? 'short' : 'long')
+        : (Math.random()<.4 ? 'long' : Math.random()<.6 ? 'short' : 'post');
+      const ideas = PLAN_IDEAS[type];
+      const idea = pick(ideas) + (focus ? ` — ${focus.slice(0,20)}` : '');
+      const time = { long:isWeekend?'11:00':'16:00', short:'10:00', post:'14:00' }[type];
 
-    const posts = [];
-
-    channels.forEach(ch => {
-      // decide type based on day
-      let type;
-      if (event) {
-        type = 'short'; // event days → Shorts first
-      } else if (isWeekend) {
-        type = Math.random() < .6 ? 'short' : 'long';
-      } else {
-        type = Math.random() < .45 ? 'long' : (Math.random() < .6 ? 'short' : 'post');
-      }
-
-      const ideas = CONTENT_IDEAS[ch] || CONTENT_IDEAS.hub;
-      const idea = pick(ideas);
-      const time = pick(TIMES_BY_TYPE[type] || ['16:00']);
-
-      posts.push({ channel: ch, type, title: idea, time, why: WHYS[type] });
-      totalPubs++;
-      if (type === 'short') shortCount++;
-      else if (type === 'long') longCount++;
-      else postCount++;
-    });
-
-    return { date: day, ds, event, posts };
-  });
-
-  // Render
-  const shortPct = Math.round((shortCount / totalPubs) * 100);
-  document.getElementById('planTitle').textContent =
-    `Контент-план на ${period} дней · Фокус: ${focus}`;
-  document.getElementById('planStats').innerHTML = `
-    <span class="stat-pill">📹 Всего: ${totalPubs}</span>
-    <span class="stat-pill badge-short" style="background:rgba(34,197,94,.1);color:#86efac;border:1px solid rgba(34,197,94,.3)">Shorts: ${shortPct}% ${shortPct >= 40 ? '✓' : '⚠️'}</span>
-    <span class="stat-pill">Лонги: ${longCount}</span>
-    <span class="stat-pill">Посты: ${postCount}</span>
-  `;
-
-  document.getElementById('planAdvice').innerHTML = `
-    <strong>💡 Стратегия на период:</strong><br/>
-    ${pick(STRAT_TIPS)}<br/><br/>
-    ${pick(STRAT_TIPS)}
-  `;
-
-  const daysEl = document.getElementById('planDays');
-  daysEl.innerHTML = '';
-
-  dayPlans.forEach(d => {
-    const div = document.createElement('div');
-    div.className = 'plan-day';
-    div.innerHTML = `
-      <div class="plan-day-header">
-        <span class="plan-day-date">${russianWeekday(d.date.getDay())}, ${d.date.getDate()} ${russianMonth(d.date.getMonth())}</span>
-        ${d.event ? `<span class="plan-day-event">⚡ ${d.event}</span>` : ''}
-      </div>
-      <div class="plan-posts">
-        ${d.posts.map(p => `
-          <div class="plan-post">
-            <div>
-              <div class="plan-post-channel ch-${p.channel}">${channelName(p.channel)}</div>
-              <span class="badge badge-${p.type}" style="margin-top:4px">${typeName(p.type)}</span>
-            </div>
-            <div>
-              <div class="plan-post-title">${p.title}</div>
-              <div class="plan-post-why">${p.why}</div>
-            </div>
-            <div class="plan-post-meta">
-              <span style="color:var(--accent);font-weight:700">${p.time}</span>
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    `;
-    daysEl.appendChild(div);
-  });
-
-  // Store for "load to schedule"
-  window._planDays = dayPlans;
-
-  document.getElementById('planResult').classList.remove('hidden');
-  showToast(`✅ Контент-план на ${period} дней готов!`);
-}
-
-function addPlanToSchedule() {
-  if (!window._planDays) return;
-  let added = 0;
-  window._planDays.forEach(d => {
-    d.posts.forEach(p => {
       // avoid duplicates
-      const exists = state.publications.some(pub => pub.date === d.ds && pub.channel === p.channel && pub.title === p.title);
+      const exists = videos.some(v=>v.date===ds&&v.channelId===ch.id);
       if (!exists) {
-        state.publications.push({ id: uid(), date: d.ds, channel: p.channel, type: p.type, title: p.title, time: p.time, status: 'planned' });
-        added++;
+        plan.push({
+          id: uid(), channelId: ch.id, title: idea,
+          date: ds, time, type, status:'planned', ytVideoId:null, ytUrl:null
+        });
       }
-    });
-  });
-  saveState();
-  renderCalendar();
-  showToast(`✅ ${added} публикаций добавлено в расписание!`);
-  switchTab('schedule');
-}
-
-// ─── ANALYTICS ───────────────────────────────────────────
-function renderAnalytics() {
-  // Events list
-  const evList = document.getElementById('eventsList');
-  evList.innerHTML = '';
-  const eventEntries = Object.entries(FOOTBALL_EVENTS).sort((a,b)=>a[0].localeCompare(b[0]));
-  if (eventEntries.length === 0) {
-    evList.innerHTML = '<p style="color:var(--text3);font-size:.85rem">Нет запланированных событий</p>';
-  } else {
-    eventEntries.forEach(([ds, name]) => {
-      const d = parseDate(ds);
-      const daysLeft = Math.round((d - new Date()) / 86400000);
-      evList.innerHTML += `
-        <div class="event-item">
-          <span class="event-date">${d.getDate()} ${russianMonth(d.getMonth())}</span>
-          <span class="event-name">${name}</span>
-          <span class="event-urgency ${daysLeft <= 3 ? 'urgency-high' : 'urgency-med'}">
-            ${daysLeft <= 0 ? 'Сегодня' : daysLeft <= 3 ? `${daysLeft}д` : `${daysLeft}д`}
-          </span>
-        </div>
-      `;
     });
   }
-
-  // Publication stats
-  const total = state.publications.length;
-  const published = state.publications.filter(p => p.status === 'published').length;
-  const planned = state.publications.filter(p => p.status === 'planned').length;
-  document.getElementById('pubStats').innerHTML = `
-    <div class="pub-stat"><div class="pub-stat-num">${total}</div><div class="pub-stat-label">Всего в расписании</div></div>
-    <div class="pub-stat"><div class="pub-stat-num" style="color:var(--green)">${published}</div><div class="pub-stat-label">Опубликовано</div></div>
-    <div class="pub-stat"><div class="pub-stat-num" style="color:var(--blue)">${planned}</div><div class="pub-stat-label">Запланировано</div></div>
-  `;
-
-  // Balance chart
-  const longs  = state.publications.filter(p => p.type === 'long').length;
-  const shorts  = state.publications.filter(p => p.type === 'short').length;
-  const posts  = state.publications.filter(p => p.type === 'post').length;
-  const tot = longs + shorts + posts || 1;
-  const lh = Math.round((longs/tot)*100);
-  const sh = Math.round((shorts/tot)*100);
-  const ph = Math.round((posts/tot)*100);
-
-  document.getElementById('balanceChart').innerHTML = `
-    <div class="balance-bar" style="height:${lh}%;background:var(--accent)">${lh}%<br/><small>Лонги</small></div>
-    <div class="balance-bar" style="height:${sh}%;background:var(--green)">${sh}%<br/><small>Shorts</small></div>
-    <div class="balance-bar" style="height:${ph}%;background:var(--blue)">${ph}%<br/><small>Посты</small></div>
-  `;
+  return plan;
 }
 
-// ─── COPY BUTTONS ─────────────────────────────────────────
-function setupCopyButtons() {
-  document.addEventListener('click', e => {
-    const btn = e.target.closest('.copy-btn');
-    if (!btn) return;
+// ─── CALENDAR RENDERING ──────────────────────────────────
+function getCalInfo() {
+  const base = new Date();
+  if (currentView==='month') {
+    base.setMonth(base.getMonth()+calOffset);
+    return { year: base.getFullYear(), month: base.getMonth() };
+  }
+  if (currentView==='week') {
+    const dow = base.getDay();
+    base.setDate(base.getDate() - (dow===0?6:dow-1) + calOffset*7);
+    return { startDate: base };
+  }
+  if (currentView==='year') {
+    return { year: new Date().getFullYear() + calOffset };
+  }
+}
 
-    if (btn.dataset.targetTags) {
-      const tags = Array.from(document.querySelectorAll('#resTags .tag'))
-        .map(t => t.textContent).join(', ');
-      navigator.clipboard?.writeText(tags).catch(() => {});
-      showToast('Теги скопированы!');
+function renderCalendar() {
+  const container = document.getElementById('calendarContainer');
+  container.innerHTML = '';
+
+  if (currentView==='month') renderMonthView(container);
+  else if (currentView==='week') renderWeekView(container);
+  else renderYearView(container);
+}
+
+function renderMonthView(container) {
+  const { year, month } = getCalInfo();
+  document.getElementById('calPeriod').textContent = `${MONTHS_RU[month]} ${year}`;
+
+  const firstDay = new Date(year, month, 1).getDay(); // 0=Sun
+  const startOffset = firstDay===0 ? 6 : firstDay-1; // Mon=0
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const todayStr = today();
+
+  const grid = document.createElement('div');
+  grid.className = 'month-grid';
+
+  ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].forEach(d=>{
+    const h=document.createElement('div');
+    h.className='month-header'; h.textContent=d;
+    grid.appendChild(h);
+  });
+
+  // prev month days
+  const prevDays = new Date(year, month, 0).getDate();
+  for (let i=startOffset-1; i>=0; i--) {
+    const cell = createDayCell(new Date(year,month-1,prevDays-i), true, todayStr, year, month);
+    grid.appendChild(cell);
+  }
+  // current month
+  for (let d=1; d<=daysInMonth; d++) {
+    const cell = createDayCell(new Date(year,month,d), false, todayStr, year, month);
+    grid.appendChild(cell);
+  }
+  // next month fill
+  const total = startOffset + daysInMonth;
+  const remaining = total%7===0 ? 0 : 7 - (total%7);
+  for (let d=1; d<=remaining; d++) {
+    const cell = createDayCell(new Date(year,month+1,d), true, todayStr, year, month);
+    grid.appendChild(cell);
+  }
+
+  container.appendChild(grid);
+}
+
+function createDayCell(date, otherMonth, todayStr, year, month) {
+  const ds = fmtDate(date);
+  const isToday = ds===todayStr;
+  const dayVids = videos.filter(v=>v.date===ds);
+
+  const cell = document.createElement('div');
+  cell.className = 'month-day' + (otherMonth?' other-month':'') + (isToday?' is-today':'');
+  cell.dataset.date = ds;
+
+  const numEl = document.createElement('div');
+  numEl.className='day-num'; numEl.textContent=date.getDate();
+  cell.appendChild(numEl);
+
+  // Football event?
+  const event = FOOTBALL_EVENTS[ds];
+  if (event) {
+    const flag = document.createElement('div');
+    flag.className='day-event-flag'; flag.textContent='⚡ '+event;
+    cell.appendChild(flag);
+  }
+
+  // Videos (show up to 3)
+  dayVids.slice(0,3).forEach(v=>{
+    const ch = channels.find(c=>c.id===v.channelId);
+    const colorIdx = ch ? ch.colorIdx : 0;
+    const vEl = document.createElement('div');
+    vEl.className = `day-video ch-${colorIdx} status-${v.status}`;
+    vEl.textContent = v.title;
+    vEl.title = `${ch?.title||'?'} · ${v.time} · ${v.type}`;
+    vEl.addEventListener('click', e => { e.stopPropagation(); openUploadModalEdit(v); });
+    cell.appendChild(vEl);
+  });
+  if (dayVids.length>3) {
+    const more = document.createElement('div');
+    more.className='day-more'; more.textContent=`+${dayVids.length-3} ещё`;
+    cell.appendChild(more);
+  }
+
+  cell.addEventListener('click', () => openUploadModal(ds));
+  return cell;
+}
+
+function renderWeekView(container) {
+  const { startDate } = getCalInfo();
+  const todayStr = today();
+  const endDate = new Date(startDate); endDate.setDate(startDate.getDate()+6);
+  document.getElementById('calPeriod').textContent =
+    `${startDate.getDate()} ${MONTHS_SHORT[startDate.getMonth()]} — ${endDate.getDate()} ${MONTHS_SHORT[endDate.getMonth()]} ${endDate.getFullYear()}`;
+
+  const grid = document.createElement('div'); grid.className='week-grid';
+
+  for (let i=0; i<7; i++) {
+    const d = new Date(startDate); d.setDate(startDate.getDate()+i);
+    const ds = fmtDate(d);
+    const isToday = ds===todayStr;
+    const dayVids = videos.filter(v=>v.date===ds);
+
+    const col = document.createElement('div');
+    col.className='week-day-col'+(isToday?' is-today':'');
+    col.innerHTML=`
+      <div class="week-day-header">
+        <div class="week-day-name">${DAYS_RU[d.getDay()]}</div>
+        <div class="week-day-num">${d.getDate()}</div>
+      </div>`;
+
+    const vidsEl = document.createElement('div'); vidsEl.className='week-videos';
+    dayVids.forEach(v=>{
+      const ch=channels.find(c=>c.id===v.channelId);
+      const colorIdx=ch?ch.colorIdx:0;
+      const vEl=document.createElement('div');
+      vEl.className=`week-video ch-${colorIdx}`;
+      vEl.textContent=`${v.time} ${v.title.slice(0,30)}`;
+      vEl.addEventListener('click',e=>{e.stopPropagation();openUploadModalEdit(v);});
+      vidsEl.appendChild(vEl);
+    });
+    col.appendChild(vidsEl);
+    col.addEventListener('click', ()=>openUploadModal(ds));
+    grid.appendChild(col);
+  }
+  container.appendChild(grid);
+}
+
+function renderYearView(container) {
+  const { year } = getCalInfo();
+  document.getElementById('calPeriod').textContent = String(year);
+  const todayStr = today();
+
+  const grid = document.createElement('div'); grid.className='year-grid';
+
+  for (let m=0; m<12; m++) {
+    const monthEl=document.createElement('div'); monthEl.className='year-month';
+    monthEl.innerHTML=`<div class="year-month-name">${MONTHS_RU[m]}</div>`;
+    const miniGrid=document.createElement('div'); miniGrid.className='year-mini-grid';
+
+    const firstDow = new Date(year,m,1).getDay();
+    const offset = firstDow===0?6:firstDow-1;
+    const days = new Date(year,m+1,0).getDate();
+
+    for(let i=0;i<offset;i++){
+      const blank=document.createElement('div');blank.className='year-mini-day';
+      miniGrid.appendChild(blank);
+    }
+    for(let d=1;d<=days;d++){
+      const ds=`${year}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const hasVid=videos.some(v=>v.date===ds);
+      const isToday=ds===todayStr;
+      const cell=document.createElement('div');
+      cell.className='year-mini-day'+(hasVid?' has-video':'')+(isToday?' is-today':'');
+      cell.title=`${d} ${MONTHS_SHORT[m]}`;
+      cell.textContent=d;
+      cell.addEventListener('click',()=>openUploadModal(ds));
+      miniGrid.appendChild(cell);
+    }
+    monthEl.appendChild(miniGrid);
+    grid.appendChild(monthEl);
+  }
+  container.appendChild(grid);
+}
+
+// ─── CHANNEL LIST ─────────────────────────────────────────
+function renderChannelList() {
+  const list = document.getElementById('channelsList');
+  list.innerHTML = '';
+  channels.forEach(ch=>{
+    const item=document.createElement('div');
+    item.className='channel-item';
+    item.innerHTML=`
+      <div class="ch-dot" style="background:${CH_DOT_COLORS[ch.colorIdx]}"></div>
+      <div class="ch-info">
+        <div class="ch-name">${ch.title}</div>
+        <div class="ch-sub">${ch.id}</div>
+      </div>`;
+    list.appendChild(item);
+  });
+}
+
+// ─── UPLOAD MODAL ─────────────────────────────────────────
+function openUploadModal(dateStr) {
+  pendingUpload = { file: null, date: dateStr };
+  currentTags = [];
+
+  resetUploadModal();
+  document.getElementById('modalDateTitle').textContent =
+    '📤 Загрузить видео — ' + formatDisplayDate(dateStr);
+  document.getElementById('scheduleDate').value = dateStr;
+
+  // Populate channel selector
+  const sel = document.getElementById('uploadChannel');
+  sel.innerHTML = channels.length
+    ? channels.map(c=>`<option value="${c.id}">${c.title}</option>`).join('')
+    : '<option value="">Сначала подключи канал</option>';
+
+  document.getElementById('uploadModal').classList.remove('hidden');
+}
+
+function openUploadModalEdit(video) {
+  openUploadModal(video.date);
+  // Pre-fill title etc if available
+}
+
+function closeUploadModal() {
+  document.getElementById('uploadModal').classList.add('hidden');
+  pendingUpload = { file:null, date:null };
+  currentTags = [];
+}
+
+function resetUploadModal() {
+  ['uploadStep1','uploadStep2','uploadStep3','uploadStep4'].forEach((id,i)=>{
+    document.getElementById(id).classList.toggle('hidden', i!==0);
+  });
+  document.getElementById('filePreview').classList.add('hidden');
+  document.getElementById('dropZone').classList.remove('hidden');
+  document.getElementById('btnGenerateMeta').disabled = true;
+  pendingUpload.file = null;
+  currentTags = [];
+  renderTags();
+}
+
+function showUploadStep(n) {
+  [1,2,3,4].forEach(i=>{
+    document.getElementById('uploadStep'+i).classList.toggle('hidden', i!==n);
+  });
+}
+
+function formatDisplayDate(ds) {
+  const d=parseDate(ds);
+  return `${d.getDate()} ${MONTHS_SHORT[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+function handleFile(file) {
+  if (!file) return;
+  pendingUpload.file = file;
+  document.getElementById('dropZone').classList.add('hidden');
+  document.getElementById('filePreview').classList.remove('hidden');
+  document.getElementById('fileName').textContent = file.name;
+  document.getElementById('fileSize').textContent = fmtSize(file.size);
+  document.getElementById('btnGenerateMeta').disabled = false;
+}
+
+function renderTags() {
+  const wrap = document.getElementById('tagsWrap');
+  wrap.innerHTML = currentTags.map((t,i)=>`
+    <span class="tag-chip">#${t}<button data-i="${i}">✕</button></span>`).join('');
+  wrap.querySelectorAll('button').forEach(btn=>{
+    btn.onclick=()=>{ currentTags.splice(Number(btn.dataset.i),1); renderTags(); };
+  });
+}
+
+// ─── PLAN MODAL ───────────────────────────────────────────
+function openPlanModal() {
+  const checkDiv = document.getElementById('planChannelsCheck');
+  checkDiv.innerHTML = channels.length
+    ? channels.map(ch=>`
+        <label>
+          <input type="checkbox" value="${ch.id}" checked/>
+          <span class="ch-dot" style="background:${CH_DOT_COLORS[ch.colorIdx]};display:inline-block;width:8px;height:8px;border-radius:50%"></span>
+          ${ch.title}
+        </label>`).join('')
+    : '<p style="color:var(--text3);font-size:.85rem">Нет подключённых каналов</p>';
+  document.getElementById('planModal').classList.remove('hidden');
+}
+
+function closePlanModal() {
+  document.getElementById('planModal').classList.add('hidden');
+}
+
+function confirmPlan() {
+  const period = document.getElementById('planPeriod').value;
+  const focus  = document.getElementById('planFocus').value.trim();
+  const checked = [...document.querySelectorAll('#planChannelsCheck input:checked')].map(i=>i.value);
+  const targetChannels = channels.filter(c=>checked.includes(c.id));
+
+  if (!targetChannels.length) { showToast('Выбери хотя бы один канал', true); return; }
+
+  const plan = generateContentPlan(period, focus, targetChannels);
+  videos.push(...plan);
+  saveStorage();
+  closePlanModal();
+  renderCalendar();
+  showToast(`✅ Добавлено ${plan.length} видео в план!`);
+}
+
+// ─── SETTINGS ─────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.add('hidden'));
+  document.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
+  document.getElementById('tab-'+name).classList.remove('hidden');
+  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  document.getElementById('pageTitle').textContent =
+    name==='calendar' ? 'Контент-календарь' : 'Настройки';
+  if (name==='settings') {
+    document.getElementById('settingsClientId').value = cfg.clientId||'';
+    document.getElementById('settingsClaudeKey').value = cfg.claudeKey||'';
+  }
+}
+
+// ─── INIT & EVENT WIRING ─────────────────────────────────
+async function init() {
+  loadStorage();
+
+  // Seed some football events
+  const base = new Date();
+  const add=(d,name)=>{const dt=new Date(base);dt.setDate(base.getDate()+d);FOOTBALL_EVENTS[fmtDate(dt)]=name;};
+  add(3,'Финал Лиги Чемпионов');add(7,'Барселона — Реал');add(11,'Начало Copa América');add(18,'Финал Лиги Европы');
+
+  // Handle OAuth callback
+  const urlParams = new URLSearchParams(window.location.search);
+  const code = urlParams.get('code');
+  if (code) {
+    // Clean URL
+    window.history.replaceState({}, '', window.location.pathname);
+    if (cfg.clientId) {
+      const ok = await handleOAuthCallback(code);
+      if (ok) { showApp(); return; }
+    }
+  }
+
+  // Decide screen
+  if (!cfg.clientId) { showSetup(); return; }
+  showApp();
+
+  // ─── SETUP SCREEN ───
+  document.getElementById('btnSaveSetup').addEventListener('click', ()=>{
+    const cid = document.getElementById('inputClientId').value.trim();
+    const ckey = document.getElementById('inputClaudeKey').value.trim();
+    if (!cid) { showToast('Введи Client ID', true); return; }
+    cfg.clientId = cid;
+    if (ckey) cfg.claudeKey = ckey;
+    saveStorage();
+    showApp();
+  });
+
+  // ─── SIDEBAR ───
+  document.getElementById('btnAddChannel').addEventListener('click', startOAuth);
+  document.getElementById('btnSidebarOpen').addEventListener('click', ()=>{
+    document.getElementById('sidebar').classList.toggle('open');
+  });
+  document.getElementById('btnSidebarClose').addEventListener('click', ()=>{
+    document.getElementById('sidebar').classList.remove('open');
+  });
+
+  // ─── TABS ───
+  document.querySelectorAll('[data-tab]').forEach(btn=>{
+    btn.addEventListener('click', ()=>switchTab(btn.dataset.tab));
+  });
+
+  // ─── VIEW SWITCHER ───
+  document.querySelectorAll('.view-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      document.querySelectorAll('.view-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      currentView = btn.dataset.view;
+      calOffset = 0;
+      renderCalendar();
+    });
+  });
+
+  // ─── CALENDAR NAV ───
+  document.getElementById('btnPrev').addEventListener('click', ()=>{ calOffset--; renderCalendar(); });
+  document.getElementById('btnNext').addEventListener('click', ()=>{ calOffset++; renderCalendar(); });
+
+  // ─── CONTENT PLAN ───
+  document.getElementById('btnGenPlan').addEventListener('click', ()=>{
+    if (!channels.length) { showToast('Сначала подключи хотя бы один канал', true); return; }
+    openPlanModal();
+  });
+  document.getElementById('btnClosePlan').addEventListener('click', closePlanModal);
+  document.getElementById('btnCancelPlan').addEventListener('click', closePlanModal);
+  document.getElementById('btnConfirmPlan').addEventListener('click', confirmPlan);
+
+  // ─── UPLOAD MODAL ───
+  document.getElementById('btnCloseUpload').addEventListener('click', closeUploadModal);
+  document.getElementById('uploadModal').addEventListener('click', e=>{
+    if (e.target===document.getElementById('uploadModal')) closeUploadModal();
+  });
+
+  // Drop zone
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  dropZone.addEventListener('click', ()=>fileInput.click());
+  dropZone.addEventListener('dragover', e=>{ e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', ()=>dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e=>{
+    e.preventDefault(); dropZone.classList.remove('drag-over');
+    handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', ()=>handleFile(fileInput.files[0]));
+  document.getElementById('btnRemoveFile').addEventListener('click', ()=>{
+    pendingUpload.file=null;
+    fileInput.value='';
+    document.getElementById('filePreview').classList.add('hidden');
+    document.getElementById('dropZone').classList.remove('hidden');
+    document.getElementById('btnGenerateMeta').disabled=true;
+  });
+
+  // Generate meta button
+  document.getElementById('btnGenerateMeta').addEventListener('click', async ()=>{
+    const btn = document.getElementById('btnGenerateMeta');
+    btn.disabled=true; btn.textContent='✨ Генерирую...';
+
+    const chId = document.getElementById('uploadChannel').value;
+    const ch = channels.find(c=>c.id===chId) || {title:'Канал'};
+    const type = document.getElementById('uploadType').value;
+    const filename = pendingUpload.file ? pendingUpload.file.name : 'video';
+
+    const meta = await generateMetadata(ch, type, filename);
+
+    document.getElementById('metaTitle').value = meta.title || '';
+    document.getElementById('metaDesc').value  = meta.description || '';
+    document.getElementById('metaHook').value      = meta.hook || '';
+    document.getElementById('metaThumbnail').value = meta.thumbnail || '';
+
+    currentTags = meta.tags || [];
+    renderTags();
+
+    // Set suggested time
+    if (meta.time) {
+      document.getElementById('scheduleTime').value = meta.time;
+    }
+
+    // Char counter
+    updateTitleCounter();
+    showUploadStep(2);
+
+    btn.disabled=false; btn.textContent='✨ Сгенерировать метаданные AI';
+  });
+
+  // Title counter
+  document.getElementById('metaTitle').addEventListener('input', updateTitleCounter);
+  function updateTitleCounter() {
+    const len = document.getElementById('metaTitle').value.length;
+    document.getElementById('titleCounter').textContent = `${len}/70`;
+    document.getElementById('titleCounter').style.color = len>70?'var(--accent)':'var(--text3)';
+  }
+
+  // Tags input
+  document.getElementById('tagsInput').addEventListener('keydown', e=>{
+    if (e.key==='Enter'||e.key===',') {
+      e.preventDefault();
+      const val = e.target.value.replace(/[#,]/g,'').trim();
+      if (val && !currentTags.includes(val)) { currentTags.push(val); renderTags(); }
+      e.target.value='';
+    }
+  });
+
+  // Back button
+  document.getElementById('btnBackToStep1').addEventListener('click', ()=>showUploadStep(1));
+
+  // Upload button
+  document.getElementById('btnUpload').addEventListener('click', async ()=>{
+    if (!pendingUpload.file) { showToast('Файл не выбран', true); return; }
+    const chId = document.getElementById('uploadChannel').value;
+    if (!chId || !channels.find(c=>c.id===chId)) {
+      showToast('Выбери канал', true); return;
+    }
+
+    const title   = document.getElementById('metaTitle').value.trim();
+    const desc    = document.getElementById('metaDesc').value.trim();
+    const date    = document.getElementById('scheduleDate').value;
+    const time    = document.getElementById('scheduleTime').value;
+    const privacy = document.getElementById('privacyStatus').value;
+
+    if (!title) { showToast('Введи заголовок', true); return; }
+
+    showUploadStep(3);
+    document.getElementById('progressTitle').textContent = `Загружаю "${title}"...`;
+
+    const videoId = await uploadToYouTube(chId, pendingUpload.file, {
+      title, description: desc, tags: currentTags, date, time, privacy
+    });
+
+    if (!videoId) {
+      showUploadStep(2);
       return;
     }
 
-    const el = document.getElementById(btn.dataset.target);
-    if (!el) return;
-    navigator.clipboard?.writeText(el.textContent).catch(() => {});
-    showToast('Скопировано в буфер!');
-  });
-}
+    // Save to calendar
+    const newVideo = {
+      id: uid(), channelId: chId, title,
+      date, time, type: document.getElementById('uploadType').value,
+      status: privacy==='public' ? 'published' : 'planned',
+      ytVideoId: videoId,
+      ytUrl: `https://www.youtube.com/watch?v=${videoId}`,
+    };
+    videos.push(newVideo);
+    saveStorage();
+    renderCalendar();
 
-// ─── SAVE TO SCHEDULE (from metadata) ────────────────────
-function saveMetaToSchedule() {
-  if (!lastGeneratedMeta) return;
-  const today = formatDate(new Date());
-  state.publications.push({
-    id: uid(),
-    date: today,
-    channel: lastGeneratedMeta.channel,
-    type: lastGeneratedMeta.type,
-    title: lastGeneratedMeta.title,
-    time: lastGeneratedMeta.recTime,
-    status: 'planned',
-  });
-  saveState();
-  showToast('✅ Добавлено в расписание!');
-  switchTab('schedule');
-  renderCalendar();
-}
-
-// ─── SIDEBAR TOGGLE ───────────────────────────────────────
-function setupSidebarToggle() {
-  const sidebar = document.getElementById('sidebar');
-  const toggle1 = document.getElementById('sidebarToggle');
-  const toggle2 = document.getElementById('topbarToggle');
-
-  [toggle1, toggle2].forEach(btn => {
-    btn.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.getElementById('doneMessage').textContent =
+      privacy==='scheduled'
+        ? `Видео запланировано на ${formatDisplayDate(date)} ${time}`
+        : 'Видео успешно загружено на YouTube!';
+    document.getElementById('doneLink').href = newVideo.ytUrl;
+    showUploadStep(4);
+    showToast('✅ Видео загружено!');
   });
 
-  document.addEventListener('click', e => {
-    if (window.innerWidth <= 768 &&
-        !sidebar.contains(e.target) &&
-        !toggle1.contains(e.target) &&
-        !toggle2.contains(e.target)) {
-      sidebar.classList.remove('open');
+  document.getElementById('btnUploadAnother').addEventListener('click', ()=>{
+    resetUploadModal();
+    showUploadStep(1);
+  });
+
+  // Settings
+  document.getElementById('btnSaveSettings').addEventListener('click', ()=>{
+    cfg.clientId = document.getElementById('settingsClientId').value.trim();
+    cfg.claudeKey = document.getElementById('settingsClaudeKey').value.trim();
+    saveStorage();
+    showToast('✅ Настройки сохранены');
+  });
+  document.getElementById('btnClearData').addEventListener('click', ()=>{
+    if (confirm('Удалить все данные? Каналы, видео, план — всё будет очищено.')) {
+      localStorage.clear();
+      location.reload();
     }
   });
-}
-
-// ─── INIT ─────────────────────────────────────────────────
-function init() {
-  loadState();
-
-  // Today badge
-  const now = new Date();
-  document.getElementById('todayBadge').textContent =
-    `${now.getDate()} ${russianMonth(now.getMonth())} ${now.getFullYear()}`;
-
-  // Tab nav
-  document.querySelectorAll('.nav-item').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-  });
-
-  // Week nav
-  document.getElementById('prevWeek').addEventListener('click', () => {
-    state.currentWeekOffset--;
-    renderCalendar();
-  });
-  document.getElementById('nextWeek').addEventListener('click', () => {
-    state.currentWeekOffset++;
-    renderCalendar();
-  });
-
-  // FAB
-  document.getElementById('openAddModal').addEventListener('click', openAddModal);
-
-  // Modal
-  document.getElementById('closeModal').addEventListener('click', closeModal);
-  document.getElementById('cancelModal').addEventListener('click', closeModal);
-  document.getElementById('confirmAdd').addEventListener('click', confirmAdd);
-  document.getElementById('addModal').addEventListener('click', e => {
-    if (e.target === document.getElementById('addModal')) closeModal();
-  });
-
-  // Metadata generator
-  document.getElementById('generateMeta').addEventListener('click', handleGenerateMeta);
-  document.getElementById('saveToSchedule').addEventListener('click', saveMetaToSchedule);
-
-  // Content plan
-  document.getElementById('generatePlan').addEventListener('click', handleGeneratePlan);
-  document.getElementById('addPlanToSchedule').addEventListener('click', addPlanToSchedule);
-
-  // Copy
-  setupCopyButtons();
-
-  // Sidebar
-  setupSidebarToggle();
-
-  // Initial render
-  renderCalendar();
 }
 
 document.addEventListener('DOMContentLoaded', init);
